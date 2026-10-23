@@ -10,7 +10,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($source,[ref]$t
 if ($parseErrors.Count) { $parseErrors | Format-List; throw 'PowerShell parser errors.' }
 function Assert-True { param([bool]$Condition,[string]$Message) if (-not $Condition) { throw $Message } }
 function Assert-Throws { param([scriptblock]$Code) $threw=$false; try { & $Code | Out-Null } catch {$threw=$true}; Assert-True $threw 'Expected configuration rejection.' }
-foreach ($name in @('Resolve-LabConfigPath','Test-LabProfile','Get-AccountDisposition','Get-CryptoIndex','New-LabPassword','New-RegistryPlan','Set-AccountPolicy','Save-Json','Write-LabWarning','Invoke-LabChange')) {
+foreach ($name in @('Resolve-LabConfigPath','Assert-ProfileProperties','Assert-ProfileInteger','Test-LabProfile','Assert-LabCapabilities','Get-AccountDisposition','Get-CryptoIndex','New-LabPassword','New-RegistryPlan','Set-AccountPolicy','Save-Json','Write-LabWarning','Invoke-LabChange','Invoke-Native')) {
     $definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
     Assert-True ($null -ne $definition) "Missing helper $name"
     . ([scriptblock]::Create($definition.Extent.Text))
@@ -42,29 +42,99 @@ Assert-True ($plan.Count -ge 30) 'Registry plan unexpectedly empty.'
 foreach ($item in $plan) { Assert-True ($item.Path -like 'HKLM:\*' -and $item.Name -and $item.Type -in @('DWord','String')) 'Invalid registry plan item.' }
 Assert-True (@($plan | Where-Object {$_.Name -eq 'EnableLUA' -and $_.Value -eq 1}).Count -eq 1) 'UAC must be enabled.'
 Assert-True (@($plan | Where-Object {$_.Name -match 'Javascript|JavaScript'}).Count -eq 0) 'JavaScript must remain unchanged.'
-Assert-True ($profile.Administrators.Count -eq 5) 'Expected five authorized administrators.'
-Assert-True ($profile.Users.Count -eq 13) 'Expected 12 original users plus tchalla.'
-Assert-True ('tchalla' -in $profile.Users -and 'tchalla' -in $profile.CreateUsers) 'New employee missing.'
-Assert-True ($profile.PrimaryAccount -eq 'pparker') 'Primary account changed.'
-Assert-True ('Wireshark*' -in $profile.ProtectedApplicationPatterns -and 'Npcap*' -in $profile.ProtectedApplicationPatterns) 'Required software must be protected.'
+# Use synthetic account names so a new README/profile does not break the suite.
+function New-TestProfile {
+    $fixture = Get-Content (Join-Path $root 'lab.config.json') -Raw | ConvertFrom-Json
+    $fixture.PrimaryAccount='labprimary'
+    $fixture.Administrators=@('labprimary','labadmin')
+    $fixture.Users=@('labuser','newemployee')
+    $fixture.CreateUsers=@('newemployee')
+    $fixture.ResetPasswordAccounts=@('labadmin')
+    $fixture.RequiredServiceNames=@()
+    $fixture.DisableServiceNames=@('RemoteRegistry')
+    $fixture.RequiredFeatureNames=@()
+    $fixture.DisableFeatureNames=@('IIS-WebServerRole','IIS-FTPServer')
+    return $fixture
+}
+$fixture = New-TestProfile
+Test-LabProfile $fixture
 $sidPrefix='S-1-5-21-100-200-300'
-Assert-True ((Get-AccountDisposition 'pparker' "$sidPrefix-1000" $profile @('pparker')) -eq 'Protected') 'Primary must be protected.'
-Assert-True ((Get-AccountDisposition 'session-admin' "$sidPrefix-1099" $profile @('session-admin')) -eq 'Protected') 'Executing account must be protected.'
-Assert-True ((Get-AccountDisposition 'attacker' "$sidPrefix-1099" $profile @('pparker')) -eq 'DisableUnauthorized') 'Unknown human account must be disabled.'
-Assert-True ((Get-AccountDisposition 'bbanner' "$sidPrefix-1001" $profile @('pparker')) -eq 'StandardUser') 'Standard user misclassified.'
-Assert-True ((Get-AccountDisposition 'nfury' "$sidPrefix-1002" $profile @('pparker')) -eq 'Administrator') 'Administrator misclassified.'
-Assert-True ((Get-AccountDisposition 'Guest' "$sidPrefix-501" $profile @('pparker')) -eq 'DisableGuest') 'Guest should be disabled.'
-Assert-True ((Get-AccountDisposition 'DefaultAccount' "$sidPrefix-503" $profile @('pparker')) -eq 'PreserveBuiltin') 'System account must not be treated as an employee.'
-$bad = Get-Content (Join-Path $root 'lab.config.json') -Raw | ConvertFrom-Json
-$bad.Administrators=@('nfury'); Assert-Throws {Test-LabProfile $bad}
-$bad = Get-Content (Join-Path $root 'lab.config.json') -Raw | ConvertFrom-Json
-$bad.Users += 'pparker'; Assert-Throws {Test-LabProfile $bad}
-$bad = Get-Content (Join-Path $root 'lab.config.json') -Raw | ConvertFrom-Json
-$bad.DisableServiceNames += 'EventLog'; Assert-Throws {Test-LabProfile $bad}
-$bad = Get-Content (Join-Path $root 'lab.config.json') -Raw | ConvertFrom-Json
-$bad.DisableServiceNames += 'CCSClient'; Assert-Throws {Test-LabProfile $bad}
-$bad = Get-Content (Join-Path $root 'lab.config.json') -Raw | ConvertFrom-Json
-$bad.PasswordPolicy.LockoutMinutes=10; Assert-Throws {Test-LabProfile $bad}
+Assert-True ((Get-AccountDisposition 'labprimary' "$sidPrefix-1000" $fixture @('labprimary')) -eq 'Protected') 'Primary must be protected.'
+Assert-True ((Get-AccountDisposition 'session-admin' "$sidPrefix-1099" $fixture @('session-admin')) -eq 'Protected') 'Executing account must be protected.'
+Assert-True ((Get-AccountDisposition 'attacker' "$sidPrefix-1099" $fixture @('labprimary')) -eq 'DisableUnauthorized') 'Unknown human account must be disabled.'
+Assert-True ((Get-AccountDisposition 'labuser' "$sidPrefix-1001" $fixture @('labprimary')) -eq 'StandardUser') 'Standard user misclassified.'
+Assert-True ((Get-AccountDisposition 'labadmin' "$sidPrefix-1002" $fixture @('labprimary')) -eq 'Administrator') 'Administrator misclassified.'
+Assert-True ((Get-AccountDisposition 'renamed-guest' "$sidPrefix-501" $fixture @('labprimary')) -eq 'DisableGuest') 'Guest must be recognized by SID even when renamed.'
+Assert-True ((Get-AccountDisposition 'DefaultAccount' "$sidPrefix-503" $fixture @('labprimary')) -eq 'PreserveBuiltin') 'System account must not be treated as an employee.'
+foreach ($invalidRoot in @($null,42,'text',@())) { Assert-Throws {Test-LabProfile $invalidRoot} }
+foreach ($mutate in @(
+    {param($p) $p.PSObject.Properties.Remove('Users')},
+    {param($p) $p | Add-Member -NotePropertyName MisspelledField -NotePropertyValue 1},
+    {param($p) $p.Users='labuser'},
+    {param($p) $p.Users=@($null)},
+    {param($p) $p.Users=@(' labuser')},
+    {param($p) $p.Users=@('labuser','LABUSER')},
+    {param($p) $p.Users += 'labprimary'},
+    {param($p) $p.Administrators=@('labadmin')},
+    {param($p) $p.RemoveNonSystemShares='false'},
+    {param($p) $p.SchemaVersion='1'},
+    {param($p) $p.LockAfterSeconds=0},
+    {param($p) $p.LockAfterSeconds=599941},
+    {param($p) $p.LockAfterSeconds=600.5},
+    {param($p) $p.PasswordPolicy.History='24'},
+    {param($p) $p.PasswordPolicy.PSObject.Properties.Remove('MaximumAgeDays')},
+    {param($p) $p.PasswordPolicy.LockoutMinutes=$p.PasswordPolicy.ResetCounterMinutes-1},
+    {param($p) $p.PasswordPolicy.LockoutMinutes=100000},
+    {param($p) $p.DisableServiceNames += 'EventLog'},
+    {param($p) $p.DisableServiceNames += 'CCSClient'},
+    {param($p) $p.DisableServiceNames += 'Remote*'},
+    {param($p) $p.DisableFeatureNames += 'IIS-*'},
+    {param($p) $p.ApplicationPackageIds=@('--help')},
+    {param($p) $p.MediaExtensions=@('mp3')},
+    {param($p) $p.ReviewExecutableNames=@('C:\Temp\tool.exe')},
+    {param($p) $p.RequiredServiceNames=@('TermService')},
+    {param($p) $p.RequiredServiceNames=@('WinRM')},
+    {param($p) $p.RequiredServiceNames=@('W3SVC')}
+)) {
+    $bad = New-TestProfile
+    & $mutate $bad
+    Assert-Throws {Test-LabProfile $bad}
+}
+$valid = New-TestProfile
+$valid.RequiredServiceNames=@('Spooler')
+Test-LabProfile $valid
+$valid = New-TestProfile
+$valid.RequiredServiceNames=@('W3SVC'); $valid.RequiredFeatureNames=@('IIS-WebServerRole')
+Test-LabProfile $valid
+$valid = New-TestProfile
+$valid.Users=@(); $valid.CreateUsers=@()
+Test-LabProfile $valid
+# Exercise real, harmless native processes: stderr alone is not a failed exit.
+$nativeOutput = @(Invoke-Native 'cmd.exe' @('/d','/c','echo diagnostic-message 1>&2 & exit /b 0'))
+Assert-True (($nativeOutput -join ' ') -like '*diagnostic-message*') 'Native stderr must be preserved.'
+Assert-True ($ErrorActionPreference -eq 'Stop') 'Native handling must restore the caller error preference.'
+$nativeFailure=$null
+try { Invoke-Native 'cmd.exe' @('/d','/c','echo native-failure 1>&2 & exit /b 7') | Out-Null }
+catch { $nativeFailure=$_.Exception.Message }
+Assert-True ($nativeFailure -like '*failed (7)*native-failure*') 'Native nonzero exits must remain failures with useful output.'
+Assert-True ($ErrorActionPreference -eq 'Stop') 'Error preference must also be restored after failure.'
+Assert-Throws { Invoke-Native 'windows11-lab-nonexistent-command.exe' @() }
+# Missing commands are collected before remediation; no installation is attempted.
+$script:AvailableTestCommands=@('Present-A','Present-B')
+$script:RequestedTestCommands=New-Object 'System.Collections.Generic.List[string]'
+function Get-Command {
+    [CmdletBinding()]param([string]$Name)
+    $script:RequestedTestCommands.Add($Name)
+    if ($Name -in $script:AvailableTestCommands) { [pscustomobject]@{Name=$Name} }
+}
+try {
+    Assert-LabCapabilities @('Present-A','Present-B','Present-A')
+    Assert-True ($script:RequestedTestCommands.Count -eq 2) 'Capability checks must avoid duplicate lookups.'
+    $capabilityFailure=$null
+    try { Assert-LabCapabilities @('Present-A','Missing-A','Missing-B') }
+    catch { $capabilityFailure=$_.Exception.Message }
+    Assert-True ($capabilityFailure -like '*Missing-A*Missing-B*') 'All missing commands must be reported together.'
+} finally { Remove-Item Function:\Get-Command }
 $seen = @{}
 for ($i=0; $i -lt 32; $i++) {
     $secure=New-LabPassword -Length 24
@@ -185,7 +255,7 @@ New-Item -ItemType Directory -Path $script:RunPath | Out-Null
 $script:Changes = New-Object 'System.Collections.Generic.List[object]'
 $script:Warnings = New-Object 'System.Collections.Generic.List[string]'
 $script:RebootNeeded = $false
-$script:ProtectedNames = @('pparker')
+$script:ProtectedNames = @('labprimary')
 $Mode = 'Audit'
 try {
     & $reportBody
@@ -208,4 +278,4 @@ $commands = @($ast.FindAll({param($n) $n -is [System.Management.Automation.Langu
 foreach ($forbidden in @('Remove-LocalUser','Remove-Item','Unregister-ScheduledTask','Restart-Computer','Stop-Computer','Clear-EventLog')) {
     Assert-True ($forbidden -notin $commands) "Unexpected destructive command $forbidden"
 }
-Write-Host 'PASS: script parses; config paths, profile, account protections, passwords, reports and stubbed actions pass. Windows remediation was not executed.'
+Write-Host 'PASS: script parses; config paths, profile validation, capabilities, native exits, account protections, passwords, reports and stubbed actions pass. Windows remediation was not executed.'

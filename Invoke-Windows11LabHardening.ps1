@@ -44,9 +44,39 @@ function Resolve-LabConfigPath {
     return $resolved.ProviderPath
 }
 
+function Assert-ProfileProperties {
+    param($Value, [string[]]$Names, [string]$Context)
+    if ($null -eq $Value -or $Value -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "$Context must be a JSON object."
+    }
+    $missing = @($Names | Where-Object { -not $Value.PSObject.Properties[$_] })
+    if ($missing.Count) { throw "${Context} is missing required fields: $($missing -join ', ')." }
+    $unknown = @($Value.PSObject.Properties.Name | Where-Object { $_ -notin $Names })
+    if ($unknown.Count) { throw "${Context} has unsupported fields (check spelling): $($unknown -join ', ')." }
+}
+
+function Assert-ProfileInteger {
+    param($Value, [string]$Name)
+    if ($Value -isnot [int] -and $Value -isnot [long]) { throw "$Name must be a JSON integer, not quoted text or a decimal." }
+}
+
 function Test-LabProfile {
     param($Profile)
+    $lists = @('Administrators','Users','CreateUsers','ResetPasswordAccounts','RequiredServiceNames','DisableServiceNames','RequiredFeatureNames','DisableFeatureNames','AllowedShareNames','ProtectedApplicationPatterns','ReviewApplicationPatterns','ApplicationPackageIds','AuditSubcategories','MediaExtensions','ReviewExecutableNames')
+    Assert-ProfileProperties $Profile (@('SchemaVersion','PrimaryAccount','PasswordPolicy','RemoveNonSystemShares','LockAfterSeconds') + $lists) 'Profile'
+    Assert-ProfileInteger $Profile.SchemaVersion 'SchemaVersion'
     if ($Profile.SchemaVersion -ne 1) { throw 'Unsupported profile schema.' }
+    if ($Profile.PrimaryAccount -isnot [string] -or [string]::IsNullOrWhiteSpace($Profile.PrimaryAccount)) { throw 'PrimaryAccount must be a nonempty account name.' }
+    if ($Profile.RemoveNonSystemShares -isnot [bool]) { throw 'RemoveNonSystemShares must be JSON true or false, without quotes.' }
+    Assert-ProfileInteger $Profile.LockAfterSeconds 'LockAfterSeconds'
+    if ($Profile.LockAfterSeconds -lt 1 -or $Profile.LockAfterSeconds -gt 599940) { throw 'LockAfterSeconds must be between 1 and 599940.' }
+    foreach ($field in $lists) {
+        if ($Profile.$field -isnot [array]) { throw "$field must be a JSON array, including when empty or containing one item." }
+        foreach ($value in $Profile.$field) {
+            if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value) -or $value -ne $value.Trim()) { throw "$field entries must be nonempty strings without surrounding spaces." }
+        }
+        if (@($Profile.$field | Sort-Object -Unique).Count -ne @($Profile.$field).Count) { throw "$field contains repeated entries." }
+    }
     $all = @($Profile.Administrators) + @($Profile.Users)
     if (@($Profile.Administrators).Count -eq 0 -or $Profile.PrimaryAccount -notin $Profile.Administrators) {
         throw 'PrimaryAccount must be an authorized administrator.'
@@ -59,20 +89,60 @@ function Test-LabProfile {
         if ($name -notin $all) { throw "Account is not authorized: $name" }
     }
     $p = $Profile.PasswordPolicy
+    $policyFields = @('MinimumLength','GeneratedLength','History','MinimumAgeDays','MaximumAgeDays','LockoutThreshold','LockoutMinutes','ResetCounterMinutes')
+    Assert-ProfileProperties $p $policyFields 'PasswordPolicy'
+    foreach ($field in $policyFields) { Assert-ProfileInteger $p.$field "PasswordPolicy.$field" }
     if ($p.MinimumLength -ne 14 -or $p.GeneratedLength -lt $p.MinimumLength -or $p.GeneratedLength -gt 128) {
         throw 'This portable local-policy profile requires MinimumLength 14 and generated passwords of 14-128 characters.'
     }
     if ($p.History -lt 1 -or $p.History -gt 24 -or $p.MinimumAgeDays -lt 0 -or $p.MaximumAgeDays -gt 999 -or $p.MaximumAgeDays -le $p.MinimumAgeDays) {
         throw 'Invalid password history or expiration interval.'
     }
-    if ($p.LockoutThreshold -lt 1 -or $p.LockoutThreshold -gt 999 -or $p.ResetCounterMinutes -lt 1 -or $p.LockoutMinutes -lt $p.ResetCounterMinutes) {
+    if ($p.LockoutThreshold -lt 1 -or $p.LockoutThreshold -gt 999 -or $p.ResetCounterMinutes -lt 1 -or $p.ResetCounterMinutes -gt 99999 -or $p.LockoutMinutes -lt $p.ResetCounterMinutes -or $p.LockoutMinutes -gt 99999) {
         throw 'Invalid account lockout policy.'
     }
     $essential = @('RpcSs','DcomLaunch','SamSs','LSM','EventLog','WinDefend','WdNisSvc','mpssvc','BFE','wuauserv','BITS','CryptSvc','Dhcp','Dnscache','Winmgmt','wscsvc','SecurityHealthService')
+    foreach ($name in @($Profile.DisableServiceNames) + @($Profile.RequiredServiceNames)) {
+        if ($name -notmatch '^[A-Za-z0-9_.$-]+$') { throw 'Service entries must be simple exact names, not patterns.' }
+    }
     foreach ($name in $Profile.DisableServiceNames) {
         if ($name -in $essential -or $name -match '(?i)ccs|cyberpatriot|vmtools|vbox') { throw "Protected service in disable list: $name" }
-        if ($name -notmatch '^[A-Za-z0-9_.-]+$') { throw 'Service disable entries must be simple exact names, not patterns.' }
     }
+    foreach ($name in @($Profile.DisableFeatureNames) + @($Profile.RequiredFeatureNames)) {
+        if ($name -notmatch '^[A-Za-z0-9_.-]+$') { throw 'Feature entries must be simple exact names, not patterns.' }
+    }
+    foreach ($id in $Profile.ApplicationPackageIds) {
+        if ($id -notmatch '^[A-Za-z0-9][A-Za-z0-9_.+-]*$') { throw "Invalid exact application package ID: $id" }
+    }
+    foreach ($extension in $Profile.MediaExtensions) {
+        if ($extension -notmatch '^\.[A-Za-z0-9]+$') { throw "Invalid media extension: $extension" }
+    }
+    foreach ($name in $Profile.ReviewExecutableNames) {
+        if ($name -notmatch '^[^\\/:*?"<>|]+\.exe$') { throw "ReviewExecutableNames must contain exact .exe filenames: $name" }
+    }
+    foreach ($name in $Profile.RequiredServiceNames) {
+        if ($name -in @('TermService','SessionEnv','UmRdpService','WinRM')) {
+            throw "Required service $name conflicts with this baseline's remote-access registry/firewall settings. Adapt those modules before Apply; a service exemption alone is insufficient."
+        }
+        $dependencies = switch ($name) {
+            'W3SVC' { 'IIS-WebServerRole' }
+            'FTPSVC' { 'IIS-WebServerRole'; 'IIS-FTPServer' }
+            'WMSVC' { 'IIS-WebServerRole' }
+        }
+        foreach ($feature in $dependencies) {
+            if ($feature -in $Profile.DisableFeatureNames -and $feature -notin $Profile.RequiredFeatureNames) {
+                throw "Required service $name conflicts with disabling feature $feature. Review the service and feature requirements together."
+            }
+        }
+    }
+}
+
+function Assert-LabCapabilities {
+    param([string[]]$CommandNames)
+    $missing = @(foreach ($name in $CommandNames | Sort-Object -Unique) {
+        if (-not (Get-Command -Name $name -ErrorAction SilentlyContinue)) { $name }
+    })
+    if ($missing.Count) { throw "Required commands are unavailable: $($missing -join ', '). Use elevated 64-bit Windows PowerShell 5.1 and verify the relevant Windows components before Apply." }
 }
 
 function Get-AccountDisposition {
@@ -130,8 +200,17 @@ function Save-Json {
 
 function Invoke-Native {
     param([string]$Program, [string[]]$Arguments)
-    $output = & $Program @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
+    $command = Get-Command -Name $Program -CommandType Application -ErrorAction Stop
+    $savedPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 can turn redirected stderr into an error even
+        # when a native tool succeeds. Preserve both streams and check its exit.
+        $ErrorActionPreference = 'Continue'
+        $LASTEXITCODE = $null
+        $output = & $command.Source @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedPreference }
+    if ($null -eq $exitCode) { throw "$Program did not return a native exit code." }
     if ($exitCode -ne 0) { throw "$Program failed ($exitCode): $($output -join ' ')" }
     return $output
 }
@@ -379,6 +458,11 @@ if ($env:SESSIONNAME -like 'RDP*' -or (Get-Variable PSSenderInfo -ErrorAction Si
 $ConfigPath = Resolve-LabConfigPath -Path $ConfigPath -ScriptDirectory $PSScriptRoot
 $script:Profile = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 Test-LabProfile $script:Profile
+$requiredCommands = @('Get-LocalUser','New-LocalUser','Set-LocalUser','Enable-LocalUser','Disable-LocalUser','Get-LocalGroup','Get-LocalGroupMember','Add-LocalGroupMember','Remove-LocalGroupMember','Get-NetFirewallProfile','Set-NetFirewallProfile','Get-NetFirewallRule','Disable-NetFirewallRule','Get-WindowsOptionalFeature','Disable-WindowsOptionalFeature','Get-SmbShare','Get-SmbShareAccess','Remove-SmbShare','Set-SmbServerConfiguration','Set-SmbClientConfiguration','Get-MpComputerStatus','Get-MpPreference','Set-MpPreference','auditpol.exe','net.exe','netsh.exe','secedit.exe','wevtutil.exe')
+if ($UpdateApps) { $requiredCommands += 'winget.exe' }
+if ($UpdateDefender) { $requiredCommands += 'Update-MpSignature' }
+if ($QuickScan) { $requiredCommands += 'Start-MpScan' }
+Assert-LabCapabilities $requiredCommands
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $current = Get-LocalUser -SID $identity.User
 $adminGroup = Get-LocalGroup -SID 'S-1-5-32-544'
@@ -410,6 +494,15 @@ Write-Host "Mode: $Mode. Reports: $script:RunPath"
 Write-Host "Passwords preserved for: $($script:ProtectedNames -join ', ')"
 
 try {
+    Save-Json 'run-info.json' ([pscustomobject]@{
+        StartedAtUtc=[DateTime]::UtcNow.ToString('o')
+        PowerShellVersion=[string]$PSVersionTable.PSVersion
+        WindowsBuild=[string]$os.BuildNumber
+        Edition=$edition
+        ScriptSHA256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+        ProfileSHA256=(Get-FileHash -LiteralPath $ConfigPath -Algorithm SHA256).Hash
+        Options=[pscustomobject]@{Mode=$Mode;WhatIf=[bool]$WhatIfPreference;RotatePasswords=[bool]$RotatePasswords;ScanFiles=[bool]$ScanFiles;UpdateApps=[bool]$UpdateApps;InstallSecurityUpdates=[bool]$InstallSecurityUpdates;UpdateDefender=[bool]$UpdateDefender;QuickScan=[bool]$QuickScan}
+    })
     Save-Inventory 'before'
     Save-Json 'applications.json' @(Get-ApplicationInventory)
     $registryPlan = @(New-RegistryPlan)

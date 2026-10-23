@@ -21,6 +21,17 @@ The GitHub workflow runs parsing and regression checks in Windows PowerShell 5.1
 
 Apply now prints `[Applying]` before each action and its result afterward, so long optional-feature servicing is easier to follow. The final console output includes each failed action's ID, target and error. Real service configuration/start failures remain failures.
 
+## Reliability checks for future labs
+
+- Profile validation rejects missing/misspelled fields, incorrect JSON types, duplicate accounts/list entries, invalid policy ranges, and wildcard service/feature names before remediation. Lists must remain JSON arrays, including `[]` and single-item arrays. Numbers and booleans must not be quoted.
+- Preflight checks that baseline commands exist and adds optional command checks only when their switches are requested. A missing dependency produces one list of unavailable commands before accounts or policies are changed; no component is installed automatically.
+- Required RDP/WinRM services are rejected until the remote-access modules are adapted. Required IIS services are checked against the feature-disable list. These checks catch known conflicts; they do not prove every possible service/application combination is compatible.
+- Native Windows tools retain stdout/stderr and are checked using their exit codes. Harmless stderr from a successful command does not become a PowerShell 5.1 false failure; unsuccessful exits remain failures.
+- Each report folder includes `run-info.json` with script/config SHA-256 hashes, Windows/PowerShell versions and requested switches. This helps distinguish old extracted copies and different run options without collecting passwords.
+- Regression tests use synthetic account names instead of requiring the first lab's five admins and thirteen users. The actual profile still must pass validation whenever it changes.
+
+These are validation and diagnostic improvements. No additional hardening settings, automatic file/app removal, or hardware-dependent protections are enabled by them. Start each new scenario by supplying its full README and forensic questions, adapting the profile and any affected modules, then running Audit before Apply.
+
 ## First run in the Windows VM
 
 Download the repository ZIP while signed in to GitHub, extract it, and open **Windows PowerShell as Administrator** in its extracted folder. Alternatively, clone the repository if Git is installed.
@@ -76,7 +87,7 @@ Do not repeat Apply just to retry a few failures: it resets passwords again (inc
 
 The supplied checklists conflict on password values. This profile selects one consistent machine-wide local policy. A standalone local password policy cannot assign different length/age requirements to administrators and standard users through `secpol.msc` alone. It uses 14 characters for both. Password expiration follows the lab requirement; it is not offered here as a universal recommendation.
 
-`RequiredServiceNames` and `RequiredFeatureNames` exempt exact names from their respective disable lists only. They do **not** automatically open firewall rules, configure authentication, or reverse registry settings. If a future scenario requires RDP, WinRM, IIS or sharing, review those modules together before applying this profile.
+`RequiredServiceNames` and `RequiredFeatureNames` exempt exact names from their respective disable lists only. They do **not** automatically open firewall rules, configure authentication, or reverse registry settings. If a future scenario requires RDP, WinRM, IIS or sharing, adapt those modules together before applying this profile. Validation stops known RDP/WinRM and IIS feature conflicts early instead of accepting a service exemption that would still break the required service.
 
 ## What is automated
 
@@ -155,6 +166,9 @@ If GitHub authentication fails, sign in using your credential manager or run `gh
 - [Microsoft: encrypted credential exports](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/export-clixml?view=powershell-5.1)
 - [Microsoft: secedit export](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/secedit-export)
 - [Microsoft: auditpol](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/auditpol)
+- [Microsoft: inactivity-limit policy range](https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/interactive-logon-machine-inactivity-limit)
+- [Microsoft: account-lockout duration range](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/account-lockout-duration)
+- [PowerShell: redirected-stderr behavior](https://github.com/PowerShell/PowerShell/issues/4002)
 - [Microsoft: WinGet upgrade](https://learn.microsoft.com/en-us/windows/package-manager/winget/upgrade)
 - [Microsoft: WUA installer properties](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/iupdateinstaller-properties)
 - [Google: default browser configuration](https://support.google.com/chrome/a/answer/7009292)
