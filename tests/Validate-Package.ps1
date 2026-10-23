@@ -196,7 +196,9 @@ try {
     $script:Changes.Add([pscustomobject]@{Id='TestApplied';Target='Stub';Description='Test';Status='Applied';Detail=''})
     $script:Warnings.Add('Test warning')
     & $reportBody
-    $rows = @(Get-Content (Join-Path $script:RunPath 'changes.json') -Raw | ConvertFrom-Json)
+    # Windows PowerShell 5.1 emits a JSON array as one pipeline object.
+    # Assign it directly instead of nesting it inside another array expression.
+    $rows = ConvertFrom-Json -InputObject (Get-Content (Join-Path $script:RunPath 'changes.json') -Raw)
     $summary = Get-Content (Join-Path $script:RunPath 'summary.json') -Raw | ConvertFrom-Json
     Assert-True ($rows.Count -eq 3 -and $rows[0].Id -eq 'Test' -and $rows[1].Detail -eq 'Simulated failure') 'Populated reports must retain rows and failure details.'
     Assert-True ($summary.Planned -eq 1 -and $summary.Applied -eq 1 -and $summary.Failed -eq 1) 'Summary must count each action status accurately.'
