@@ -11,7 +11,7 @@ Use 64-bit Windows PowerShell 5.1 at the VM console. Take a VM snapshot first.
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     [ValidateSet('Audit', 'Apply')][string]$Mode = 'Audit',
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'lab.config.json'),
+    [string]$ConfigPath = '',
     [switch]$RotatePasswords,
     [switch]$ScanFiles,
     [switch]$UpdateApps,
@@ -27,6 +27,22 @@ $script:Changes = New-Object 'System.Collections.Generic.List[object]'
 $script:Warnings = New-Object 'System.Collections.Generic.List[string]'
 $script:RebootNeeded = $false
 $script:CreatedNow = New-Object 'System.Collections.Generic.List[string]'
+
+function Resolve-LabConfigPath {
+    param([string]$Path, [string]$ScriptDirectory)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        if ([string]::IsNullOrWhiteSpace($ScriptDirectory)) {
+            throw 'Cannot locate lab.config.json. Save the complete .ps1 file and run it with powershell.exe -File, or provide -ConfigPath explicitly.'
+        }
+        $Path = Join-Path -Path $ScriptDirectory -ChildPath 'lab.config.json'
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Lab configuration file not found: $Path. Extract the entire package or provide -ConfigPath with the JSON file location."
+    }
+    $resolved = Resolve-Path -LiteralPath $Path
+    if ($resolved.Provider.Name -ne 'FileSystem') { throw 'ConfigPath must identify a JSON file on the filesystem.' }
+    return $resolved.ProviderPath
+}
 
 function Test-LabProfile {
     param($Profile)
@@ -124,6 +140,7 @@ function Invoke-LabChange {
     param([string]$Id, [string]$Target, [string]$Description, [scriptblock]$Action)
     $status = 'Planned'; $detail = ''
     if ($Mode -eq 'Apply' -and $script:Runner.ShouldProcess($Target, $Description)) {
+        Write-Host "[Applying] $Description : $Target"
         try { & $Action | Out-Null; $status = 'Applied' }
         catch { $status = 'Failed'; $detail = $_.Exception.Message; Write-LabWarning "$Id failed: $detail" }
     }
@@ -359,6 +376,7 @@ $edition = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion
 if ($edition -like 'Core*') { throw 'Use Windows 11 Pro, Education or Enterprise; this package relies on local security-policy tools.' }
 if ($computer.PartOfDomain) { throw 'This local-account lab profile must not run on a domain-joined computer.' }
 if ($env:SESSIONNAME -like 'RDP*' -or (Get-Variable PSSenderInfo -ErrorAction SilentlyContinue)) { throw 'Use the VM console; this profile disables remote management.' }
+$ConfigPath = Resolve-LabConfigPath -Path $ConfigPath -ScriptDirectory $PSScriptRoot
 $script:Profile = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 Test-LabProfile $script:Profile
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -445,7 +463,7 @@ try {
         if ([string]$member.SID -match '-500$') { continue }
         $shortName = $member.Name.Split('\')[-1]
         if ($shortName -notin $script:Profile.Administrators -and $shortName -notin $script:ProtectedNames) {
-            Invoke-LabChange 'RemoveAdmin' $member.Name 'Remove unauthorized administrator membership' { Remove-LocalGroupMember -Group $adminGroup.Name -Member $member.SID }
+            Invoke-LabChange 'RemoveAdmin' $member.Name 'Remove unauthorized administrator membership' { Remove-LocalGroupMember -Group $adminGroup.Name -Member $member }
         }
     }
     # No RDP, Backup Operators, Power Users or guest privileges are authorized in this profile.
@@ -454,7 +472,7 @@ try {
         if (-not $group) { continue }
         foreach ($member in Get-LocalGroupMember -Group $group.Name) {
             if ([string]$member.SID -match '-501$' -and $groupSid -eq 'S-1-5-32-546') { continue }
-            Invoke-LabChange 'RemovePrivilege' "$($group.Name): $($member.Name)" 'Remove unneeded privileged/guest group membership' { Remove-LocalGroupMember -Group $group.Name -Member $member.SID }
+            Invoke-LabChange 'RemovePrivilege' "$($group.Name): $($member.Name)" 'Remove unneeded privileged/guest group membership' { Remove-LocalGroupMember -Group $group.Name -Member $member }
         }
     }
 
@@ -507,7 +525,17 @@ try {
         }
     }
     foreach ($name in @('EventLog','wscsvc')) {
-        Invoke-LabChange 'MonitoringService' $name 'Ensure security/event monitoring service is enabled and running' { Set-Service -Name $name -StartupType Automatic; Start-Service -Name $name }
+        Invoke-LabChange 'MonitoringService' $name 'Ensure security/event monitoring service is enabled and running' {
+            $service = Get-Service -Name $name
+            # Avoid unnecessary configuration writes, including to protected services.
+            # Automatic also includes delayed automatic startup; preserve that setting.
+            if ($service.StartType -ne 'Automatic') { Set-Service -Name $name -StartupType Automatic }
+            if ($service.Status -ne 'Running') { Start-Service -Name $name }
+            $verified = Get-Service -Name $name
+            if ($verified.StartType -ne 'Automatic' -or $verified.Status -ne 'Running') {
+                throw "Service $name did not reach Running with Automatic startup (Status=$($verified.Status); StartType=$($verified.StartType))."
+            }
+        }
     }
     Invoke-LabChange 'SecurityHealth' 'SecurityHealthService' 'Start Windows Security health reporting' { Start-Service -Name SecurityHealthService }
     Invoke-LabChange 'Defender' 'Microsoft Defender' 'Enable realtime, behavior, downloaded-file, script and archive protection; block potentially unwanted apps' {
@@ -546,9 +574,15 @@ try {
     $script:Changes.Add([pscustomobject]@{Id='Fatal';Target='Run';Description='Run stopped by a terminating error';Status='Failed';Detail=$_.Exception.Message})
     throw
 } finally {
-    Save-Json 'changes.json' @($script:Changes)
-    Save-Json 'warnings.json' @($script:Warnings)
+    # Avoid the Windows PowerShell List[object] -> @() conversion bug.
+    Save-Json 'changes.json' ($script:Changes.ToArray())
+    Save-Json 'warnings.json' ($script:Warnings.ToArray())
     Save-Json 'summary.json' ([pscustomobject]@{Mode=$Mode;WhatIf=[bool]$WhatIfPreference;RebootNeeded=$script:RebootNeeded;Applied=@($script:Changes | Where-Object Status -eq 'Applied').Count;Planned=@($script:Changes | Where-Object Status -eq 'Planned').Count;Failed=@($script:Changes | Where-Object Status -eq 'Failed').Count;ProtectedAccounts=$script:ProtectedNames})
+    $failedChanges = @($script:Changes | Where-Object Status -eq 'Failed')
+    if ($failedChanges.Count -gt 0) {
+        Write-Host 'Failed actions (also saved in changes.json):'
+        $failedChanges | Format-List Id,Target,Detail | Out-Host
+    }
     Write-Host "Reports saved to $script:RunPath"
     if ($script:RebootNeeded) { Write-Warning 'Restart may be needed. No restart was initiated.' }
 }

@@ -7,6 +7,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Parse script and test pure helpers without changing the runner
+      - name: Parse script and test helpers and action blocks without remediation
         shell: powershell
         run: .\tests\Validate-Package.ps1

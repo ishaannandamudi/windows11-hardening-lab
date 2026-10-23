@@ -8,11 +8,24 @@ Take a VM snapshot. Read any forensic questions before making changes. Run at th
 
 The profile preserves the passwords of `pparker`, the account running the script, and any configured auto-login account. It does not change the system time, time zone, Windows release, JavaScript, CCS Client, authorized home directories, or required application installations. The attached source README and its plaintext passwords are deliberately excluded from this repository.
 
-This version was reviewed and checked for package consistency on macOS. Windows PowerShell parsing/helper tests and Windows remediation have **not** been run by the authoring environment. The included GitHub workflow parses the script and tests pure helpers without executing remediation. A passing workflow does not replace testing in the VM.
+The GitHub workflow runs parsing and regression checks in Windows PowerShell 5.1. It tests config paths, profile validation, password helpers, report serialization, native group-member parameter binding and service actions with harmless stubs. It never runs the hardening entrypoint or modifies accounts/services. A passing workflow does not replace an Audit and supervised Apply in the VM.
+
+## Fixes from the first lab run
+
+| Observed issue | Correction |
+| --- | --- |
+| Removing administrator rights failed because a SID object could not bind to `Member` | Pass the existing `LocalPrincipal` object in both administrator and other privileged-group removals |
+| Reports failed with `Argument types do not match` | Convert the generic lists with `ToArray()` before serializing; test empty and populated reports |
+| An empty path caused a cryptic `Join-Path` error | Resolve the default config beside the saved script after parameter binding; accept an explicit literal path and explain missing files |
+| Security Center configuration returned access denied even though it was already Running/Automatic | Inspect the service first, avoid unnecessary configuration writes, preserve automatic/delayed automatic startup, and verify its final state |
+
+Apply now prints `[Applying]` before each action and its result afterward, so long optional-feature servicing is easier to follow. The final console output includes each failed action's ID, target and error. Real service configuration/start failures remain failures.
 
 ## First run in the Windows VM
 
 Download the repository ZIP while signed in to GitHub, extract it, and open **Windows PowerShell as Administrator** in its extracted folder. Alternatively, clone the repository if Git is installed.
+
+Keep the complete `.ps1` file, `lab.config.json` and `tests` folder together; run the saved file instead of pasting its body into the console. For a different lab, update the scenario-specific account lists, protected applications, services and features before running Audit or Apply.
 
 ```powershell
 git clone https://github.com/ishaannandamudi/windows11-hardening-lab.git
@@ -23,7 +36,7 @@ Validate the package and collect an audit/plan:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Validate-Package.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -Mode Audit -RotatePasswords -ScanFiles
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -ConfigPath .\lab.config.json -Mode Audit -RotatePasswords -ScanFiles
 ```
 
 `-ExecutionPolicy Bypass` affects only the new PowerShell process. Audit exports settings and writes reports but does not apply the hardening actions. Its plan lists intended operations, including re-enforcement of settings that may already comply; it is not a claim that every listed operation represents a vulnerability.
@@ -33,16 +46,18 @@ Review the printed report folder, especially `changes.json`, `before-users.json`
 Apply the baseline and rotate authorized local-user passwords, preserving the protected login accounts:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -Mode Apply -RotatePasswords
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -ConfigPath .\lab.config.json -Mode Apply -RotatePasswords
 ```
 
 Optional update flags may be added to that Apply command:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -Mode Apply -RotatePasswords -UpdateDefender -UpdateApps -InstallSecurityUpdates
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -ConfigPath .\lab.config.json -Mode Apply -RotatePasswords -UpdateDefender -UpdateApps -InstallSecurityUpdates
 ```
 
 Updates can take a long time. No restart is requested. Restart manually when ready, then run Audit again and verify business applications and sign-in. Exit code 2 means one or more requested actions failed; inspect `changes.json`. A preflight/terminating error returns a PowerShell failure. Nonzero WinGet results need review, including the ordinary case where an app has no available upgrade.
+
+Do not repeat Apply just to retry a few failures: it resets passwords again (including hhogan even without `-RotatePasswords`). Correct and verify individual failed actions instead. Group removal passes the existing local principal object, rather than a raw SID object. Monitoring actions check the service first and preserve an existing automatic/delayed automatic startup setting. An access-denied configuration error alone does not establish whether Security Center is stopped; inspect `Get-Service wscsvc | Format-List Name,Status,StartType` before deciding what needs repair.
 
 `-WhatIf` with `-Mode Apply` also prevents remediation. `-ScanFiles` adds an optional file inventory; it does not delete findings. `-QuickScan` requests a Defender scan, **whose existing antivirus policy can quarantine detections**. Review protected lab components and forensic evidence before requesting a scan. This flag is off by default. Enabling real-time Defender protection can also trigger normal antivirus remediation independently of a requested scan.
 
