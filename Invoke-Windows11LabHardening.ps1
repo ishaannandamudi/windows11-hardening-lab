@@ -17,7 +17,8 @@ param(
     [switch]$UpdateApps,
     [switch]$InstallSecurityUpdates,
     [switch]$UpdateDefender,
-    [switch]$QuickScan
+    [switch]$QuickScan,
+    [switch]$AdvancedAudit
 )
 
 Set-StrictMode -Version Latest
@@ -465,6 +466,10 @@ if ($UpdateApps) { $requiredCommands += 'winget.exe' }
 if ($UpdateDefender) { $requiredCommands += 'Update-MpSignature' }
 if ($QuickScan) { $requiredCommands += 'Start-MpScan' }
 Assert-LabCapabilities $requiredCommands
+$advancedAuditModule = Join-Path $PSScriptRoot 'modules\Lab.AdvancedAudit.psm1'
+if ($AdvancedAudit -and -not (Test-Path -LiteralPath $advancedAuditModule -PathType Leaf)) {
+    throw 'AdvancedAudit requires modules\Lab.AdvancedAudit.psm1. Extract the complete repository ZIP.'
+}
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $current = Get-LocalUser -SID $identity.User
 $adminGroup = Get-LocalGroup -SID 'S-1-5-32-544'
@@ -503,7 +508,8 @@ try {
         Edition=$edition
         ScriptSHA256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
         ProfileSHA256=(Get-FileHash -LiteralPath $ConfigPath -Algorithm SHA256).Hash
-        Options=[pscustomobject]@{Mode=$Mode;WhatIf=[bool]$WhatIfPreference;RotatePasswords=[bool]$RotatePasswords;ScanFiles=[bool]$ScanFiles;UpdateApps=[bool]$UpdateApps;InstallSecurityUpdates=[bool]$InstallSecurityUpdates;UpdateDefender=[bool]$UpdateDefender;QuickScan=[bool]$QuickScan}
+        AdvancedAuditModuleSHA256=$(if ($AdvancedAudit) {(Get-FileHash -LiteralPath $advancedAuditModule -Algorithm SHA256).Hash} else {$null})
+        Options=[pscustomobject]@{Mode=$Mode;WhatIf=[bool]$WhatIfPreference;RotatePasswords=[bool]$RotatePasswords;ScanFiles=[bool]$ScanFiles;UpdateApps=[bool]$UpdateApps;InstallSecurityUpdates=[bool]$InstallSecurityUpdates;UpdateDefender=[bool]$UpdateDefender;QuickScan=[bool]$QuickScan;AdvancedAudit=[bool]$AdvancedAudit}
     })
     Save-Inventory 'before'
     Save-Json 'applications.json' @(Get-ApplicationInventory)
@@ -512,6 +518,12 @@ try {
     Save-RegistryBefore $registryPlan
     # These commands only export settings. Backups are mandatory before remediation.
     Save-LabBackups
+    if ($AdvancedAudit) {
+        try {
+            Import-Module -Name $advancedAuditModule -Force -ErrorAction Stop
+            Invoke-LabAdvancedAudit -OutputDirectory $script:RunPath -RegistryPlan $registryPlan
+        } catch { Write-LabWarning "Advanced audit incomplete: $($_.Exception.Message). Check advanced reports and collected evidence manually." }
+    }
     $allAuthorized = @($script:Profile.Administrators) + @($script:Profile.Users)
 
     foreach ($name in $script:Profile.CreateUsers) {

@@ -10,3 +10,6 @@ jobs:
       - name: Parse script and test helpers and action blocks without remediation
         shell: powershell
         run: .\tests\Validate-Package.ps1
+      - name: Test read-only advanced audit and its report isolation
+        shell: powershell
+        run: .\tests\Validate-AdvancedAudit.ps1

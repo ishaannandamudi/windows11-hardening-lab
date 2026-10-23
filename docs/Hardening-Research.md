@@ -2,6 +2,8 @@
 
 Research date: October 23, 2026. Compared with script/config version `1181ac2` and the supplied Arc Foundry lab README. These are proposals, not implemented controls. This research does not change script behavior or establish that a future image scores any particular setting.
 
+Update: [Coverage and time-saving priorities](Coverage-Roadmap.md) records the subsequent optional `-AdvancedAudit` implementation. Selected reporting proposals below are now available behind that switch; the enforcement/cleanup proposals remain unimplemented. The comparison below is retained as the original research snapshot.
+
 ## Highest priority: scenario-approved cleanup
 
 The completed lab report awarded 17 points for removing the Brutus archive (5), Burp Suite (4), Jellyfin (4), and Nmap (4). The current script inventories applications and selected files; it does not uninstall applications or delete archives. Its review application patterns do not yet include Burp Suite, Jellyfin or Nmap, and the optional file scan does not specifically identify tool archives. This is an observed coverage gap rather than a prediction about future scoring.

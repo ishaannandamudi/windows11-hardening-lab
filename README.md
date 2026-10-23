@@ -36,7 +36,7 @@ These are validation and diagnostic improvements. No additional hardening settin
 
 Download the repository ZIP while signed in to GitHub, extract it, and open **Windows PowerShell as Administrator** in its extracted folder. Alternatively, clone the repository if Git is installed.
 
-Keep the complete `.ps1` file, `lab.config.json` and `tests` folder together; run the saved file instead of pasting its body into the console. For a different lab, update the scenario-specific account lists, protected applications, services and features before running Audit or Apply.
+Keep the complete repository, including the `.ps1` file, `lab.config.json`, `modules` and `tests` folders, together; run the saved file instead of pasting its body into the console. For a different lab, update the scenario-specific account lists, protected applications, services and features before running Audit or Apply.
 
 ```powershell
 git clone https://github.com/ishaannandamudi/windows11-hardening-lab.git
@@ -53,6 +53,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHar
 `-ExecutionPolicy Bypass` affects only the new PowerShell process. Audit exports settings and writes reports but does not apply the hardening actions. Its plan lists intended operations, including re-enforcement of settings that may already comply; it is not a claim that every listed operation represents a vulnerability.
 
 Review the printed report folder, especially `changes.json`, `before-users.json`, `applications.json`, `review-files.json`, `before-tasks.json`, `before-exclusions.json`, and `warnings.json`.
+
+For deeper inspection, add `-AdvancedAudit` to the Audit command:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -ConfigPath .\lab.config.json -Mode Audit -AdvancedAudit
+```
+
+Open `advanced-review.txt` first. The optional module compares stored registry values with the existing profile, inspects execution/logon/WMI hooks, existing BITS jobs, port forwarding, hosts/DNS/proxies, and Defender state. It writes evidence and review findings without changing settings or executing discovered commands. `High` means review first; `Unknown` means a check failed. Missing registry settings may select secure defaults. Only loaded user hives are inspected. These are observations **before** remediation, not proof of malware, points, or full compliance. Run a fresh Audit after changes. See [coverage and next priorities](docs/Coverage-Roadmap.md) for the basic coverage matrix, exact limitations and researched additions. The existing fixes and scenario settings remain in place; this switch is off by default.
 
 Apply the baseline and rotate authorized local-user passwords, preserving the protected login accounts:
 
@@ -133,7 +141,7 @@ Configuration exports are **not a complete rollback**. They do not undo password
 
 ## Manual work that remains
 
-[Additional Windows 11 research](docs/Hardening-Research.md) compares proposed extensions with the current script, separates new coverage from existing inventories, and records implementation/compatibility requirements. These proposals are not enabled by the current script.
+[Coverage and time-saving priorities](docs/Coverage-Roadmap.md) documents the implemented optional advanced audit and remaining work. [Original Windows 11 research](docs/Hardening-Research.md) retains the earlier proposals and compatibility requirements. Proposed cleanup and new enforcement settings are not enabled.
 
 - Set **Google Chrome as the default** under Settings > Apps > Default apps in each account and verify the latest stable version. The script does not bypass Windows UserChoice protection. Some Chrome enterprise policies may depend on browser/device management state; verify `chrome://policy`.
 - Read forensic questions first. Examine suspicious tasks, startup entries, listening processes, event logs, user rights and files before changing or deleting them.
@@ -152,7 +160,7 @@ Clone once, then copy this package's files into the cloned folder (including `.g
 git clone https://github.com/ishaannandamudi/windows11-hardening-lab.git
 cd windows11-hardening-lab
 git status
-git add README.md Invoke-Windows11LabHardening.ps1 lab.config.json tests .github .gitignore .gitattributes
+git add README.md Invoke-Windows11LabHardening.ps1 lab.config.json modules docs tests .github .gitignore .gitattributes
 git diff --cached --stat
 git commit -m "Add Windows 11 lab hardening automation"
 git push -u origin HEAD
