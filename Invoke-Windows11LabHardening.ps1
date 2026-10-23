@@ -199,17 +199,19 @@ function Save-Json {
 }
 
 function Invoke-Native {
-    param([string]$Program, [string[]]$Arguments)
+    param([string]$Program, [string[]]$Arguments, [string]$OutputPath = '')
     $command = Get-Command -Name $Program -CommandType Application -ErrorAction Stop
     $savedPreference = $ErrorActionPreference
     try {
         # Windows PowerShell 5.1 can turn redirected stderr into an error even
         # when a native tool succeeds. Preserve both streams and check its exit.
         $ErrorActionPreference = 'Continue'
-        $LASTEXITCODE = $null
+        # Native execution updates the global automatic variable, even in a function.
+        $global:LASTEXITCODE = $null
         $output = & $command.Source @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
+        $exitCode = $global:LASTEXITCODE
     } finally { $ErrorActionPreference = $savedPreference }
+    if ($OutputPath) { $output | Set-Content -LiteralPath $OutputPath -Encoding UTF8 }
     if ($null -eq $exitCode) { throw "$Program did not return a native exit code." }
     if ($exitCode -ne 0) { throw "$Program failed ($exitCode): $($output -join ' ')" }
     return $output
@@ -641,10 +643,7 @@ try {
             Invoke-LabChange 'ApplicationUpdate' $packageId 'Upgrade this required application using its exact WinGet package ID' {
                 if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) { throw 'WinGet is unavailable; update from the vendor manually.' }
                 # Do not install missing apps, accept new agreements, upgrade all, or permit reboot.
-                $output = & winget.exe upgrade --id $packageId --exact --source winget --silent --disable-interactivity 2>&1
-                $code = $LASTEXITCODE
-                $output | Set-Content (Join-Path $script:RunPath "$packageId-upgrade.txt")
-                if ($code -ne 0) { throw "WinGet returned $code; see package log. It may be current, missing, or require interactive agreement." }
+                Invoke-Native 'winget.exe' @('upgrade','--id',$packageId,'--exact','--source','winget','--silent','--disable-interactivity') -OutputPath (Join-Path $script:RunPath "$packageId-upgrade.txt") | Out-Null
             }
         }
     }

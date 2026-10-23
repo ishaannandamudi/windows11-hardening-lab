@@ -110,15 +110,25 @@ $valid = New-TestProfile
 $valid.Users=@(); $valid.CreateUsers=@()
 Test-LabProfile $valid
 # Exercise real, harmless native processes: stderr alone is not a failed exit.
-$nativeOutput = @(Invoke-Native 'cmd.exe' @('/d','/c','echo diagnostic-message 1>&2 & exit /b 0'))
-Assert-True (($nativeOutput -join ' ') -like '*diagnostic-message*') 'Native stderr must be preserved.'
-Assert-True ($ErrorActionPreference -eq 'Stop') 'Native handling must restore the caller error preference.'
-$nativeFailure=$null
-try { Invoke-Native 'cmd.exe' @('/d','/c','echo native-failure 1>&2 & exit /b 7') | Out-Null }
-catch { $nativeFailure=$_.Exception.Message }
-Assert-True ($nativeFailure -like '*failed (7)*native-failure*') 'Native nonzero exits must remain failures with useful output.'
-Assert-True ($ErrorActionPreference -eq 'Stop') 'Error preference must also be restored after failure.'
-Assert-Throws { Invoke-Native 'windows11-lab-nonexistent-command.exe' @() }
+$nativeLog = [IO.Path]::GetTempFileName()
+try {
+    $nativeOutput = @(Invoke-Native 'cmd.exe' @('/d','/c','echo diagnostic-message 1>&2 & exit /b 0') -OutputPath $nativeLog)
+    Assert-True (($nativeOutput -join ' ') -like '*diagnostic-message*') 'Native stderr must be preserved.'
+    Assert-True ((Get-Content -LiteralPath $nativeLog -Raw) -like '*diagnostic-message*') 'Successful native commands must save requested output logs.'
+    Assert-True ($ErrorActionPreference -eq 'Stop') 'Native handling must restore the caller error preference.'
+    $nativeFailure=$null
+    try { Invoke-Native 'cmd.exe' @('/d','/c','echo native-failure 1>&2 & exit /b 7') -OutputPath $nativeLog | Out-Null }
+    catch { $nativeFailure=$_.Exception.Message }
+    Assert-True ($nativeFailure -like '*failed (7)*native-failure*') 'Native nonzero exits must remain failures with useful output.'
+    Assert-True ((Get-Content -LiteralPath $nativeLog -Raw) -like '*native-failure*') 'Failed native commands must also save their requested output logs.'
+    Assert-True ($ErrorActionPreference -eq 'Stop') 'Error preference must also be restored after failure.'
+    Assert-Throws { Invoke-Native 'windows11-lab-nonexistent-command.exe' @() }
+    & {
+        $LASTEXITCODE=123
+        Invoke-Native 'cmd.exe' @('/d','/c','exit /b 0') | Out-Null
+        Assert-True ($LASTEXITCODE -eq 123 -and $global:LASTEXITCODE -eq 0) 'Native handling must read the global exit code even when a caller has a local variable with that name.'
+    }
+} finally { Remove-Item -LiteralPath $nativeLog -Force }
 # Missing commands are collected before remediation; no installation is attempted.
 $script:AvailableTestCommands=@('Present-A','Present-B')
 $script:RequestedTestCommands=New-Object 'System.Collections.Generic.List[string]'
