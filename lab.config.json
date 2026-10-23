@@ -1,0 +1,31 @@
+{
+  "SchemaVersion": 1,
+  "PrimaryAccount": "pparker",
+  "Administrators": ["pparker", "tstark", "ppotts", "hhogan", "nfury"],
+  "Users": ["bbanner", "cbarton", "swilson", "bbarnes", "sstrange", "wmaximoff", "jrhodes", "slang", "hvandyne", "cdanvers", "shuri", "okoye", "tchalla"],
+  "CreateUsers": ["tchalla"],
+  "ResetPasswordAccounts": ["hhogan"],
+  "PasswordPolicy": {
+    "MinimumLength": 14,
+    "GeneratedLength": 24,
+    "History": 24,
+    "MinimumAgeDays": 1,
+    "MaximumAgeDays": 60,
+    "LockoutThreshold": 5,
+    "LockoutMinutes": 30,
+    "ResetCounterMinutes": 30
+  },
+  "RequiredServiceNames": [],
+  "DisableServiceNames": ["RemoteRegistry", "RemoteAccess", "SSDPSRV", "upnphost", "WMSVC", "W3SVC", "FTPSVC", "SMTPSVC", "SNMP", "SNMPTRAP", "TlntSvr", "WinRM", "TermService", "SessionEnv", "UmRdpService"],
+  "RequiredFeatureNames": [],
+  "DisableFeatureNames": ["SMB1Protocol", "MicrosoftWindowsPowerShellV2Root", "MicrosoftWindowsPowerShellV2", "TelnetClient", "TFTP", "SimpleTCP", "IIS-WebServerRole", "IIS-FTPServer", "ServicesForNFS-ClientOnly", "ClientForNFS-Infrastructure"],
+  "AllowedShareNames": [],
+  "RemoveNonSystemShares": true,
+  "ProtectedApplicationPatterns": ["Google Chrome*", "Notepad++*", "7-Zip*", "Wireshark*", "Npcap*", "*CCS*", "*CyberPatriot*", "*VMware Tools*", "*VirtualBox Guest Additions*"],
+  "ReviewApplicationPatterns": ["*BitTorrent*", "*uTorrent*", "*qBittorrent*", "*TeamViewer*", "*AnyDesk*", "*Ophcrack*", "*Hashcat*", "*John the Ripper*", "*Brutus*", "*Cain*", "*Netcat*"],
+  "ApplicationPackageIds": ["Google.Chrome", "Notepad++.Notepad++", "7zip.7zip", "WiresharkFoundation.Wireshark"],
+  "AuditSubcategories": ["Logon", "Logoff", "Account Lockout", "Special Logon", "User Account Management", "Security Group Management", "Credential Validation", "Process Creation", "Audit Policy Change", "Authentication Policy Change", "Authorization Policy Change", "Security State Change", "Security System Extension", "System Integrity", "Other System Events", "File Share", "Detailed File Share", "Sensitive Privilege Use"],
+  "MediaExtensions": [".mp3", ".mp4", ".avi", ".mov", ".mkv", ".flac", ".wav", ".wma"],
+  "ReviewExecutableNames": ["nc.exe", "nc64.exe", "ncat.exe", "netcat.exe", "hashcat.exe", "ophcrack.exe", "brutus.exe", "bittorrent.exe", "utorrent.exe"],
+  "LockAfterSeconds": 600
+}

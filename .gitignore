@@ -1,0 +1,17 @@
+# VM reports, security-policy exports, encrypted credentials and local lab documents
+Runs/
+reports/
+backups/
+*.credential.xml
+*.sdb
+*.wfw
+*.log
+*.evtx
+*.etl
+*.pdf
+*.pcap
+*.pcapng
+lab-readme*
+*.local.json
+.DS_Store
+Thumbs.db

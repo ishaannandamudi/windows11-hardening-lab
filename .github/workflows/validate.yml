@@ -1,0 +1,12 @@
+name: Validate PowerShell package
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parse script and test pure helpers without changing the runner
+        shell: powershell
+        run: .\tests\Validate-Package.ps1
