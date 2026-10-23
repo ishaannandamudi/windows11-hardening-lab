@@ -133,6 +133,8 @@ Configuration exports are **not a complete rollback**. They do not undo password
 
 ## Manual work that remains
 
+[Additional Windows 11 research](docs/Hardening-Research.md) compares proposed extensions with the current script, separates new coverage from existing inventories, and records implementation/compatibility requirements. These proposals are not enabled by the current script.
+
 - Set **Google Chrome as the default** under Settings > Apps > Default apps in each account and verify the latest stable version. The script does not bypass Windows UserChoice protection. Some Chrome enterprise policies may depend on browser/device management state; verify `chrome://policy`.
 - Read forensic questions first. Examine suspicious tasks, startup entries, listening processes, event logs, user rights and files before changing or deleting them.
 - Review unauthorized software in `applications.json`, including portable apps and installations in other users' profiles. Uninstall confirmed unwanted software through its supported uninstaller. Wireshark and Npcap are required here.
