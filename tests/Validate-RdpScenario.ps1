@@ -90,7 +90,7 @@ $script:Services=@{
     SessionEnv=[pscustomobject]@{StartType='Manual';Status='Stopped'}
     UmRdpService=[pscustomobject]@{StartType='Disabled';Status='Stopped'}
 }
-function Get-Service { param([string]$Name) $script:Services[$Name] }
+function Get-Service { param([string[]]$Name) foreach ($item in $Name) { $script:Services[$item] } }
 function Set-Service { param([string]$Name,[string]$StartupType) $script:ServiceChanges.Add("${Name}:$StartupType"); $script:Services[$Name].StartType=$StartupType }
 function Start-Service { param([string]$Name) $script:ServiceStarts.Add($Name); $script:Services[$Name].Status='Running' }
 Set-LabRdpServices
@@ -101,12 +101,13 @@ Assert-True ($script:Services.TermService.StartType -eq 'Automatic' -and $script
 
 $script:FirewallWrites=New-Object 'System.Collections.Generic.List[object]'
 $script:RejectFirewall=$false
-function Get-ItemProperty { [CmdletBinding()]param([string]$LiteralPath,[string]$Name) [pscustomobject]@{PortNumber=3391} }
+function Get-ItemProperty { [CmdletBinding()]param([string]$LiteralPath,[string]$Name) [pscustomobject]@{PortNumber=3391;UserAuthentication=1;SecurityLayer=2;MinEncryptionLevel=3} }
 function Get-NetFirewallRule {
-    [CmdletBinding()]param([string]$Name,[string]$PolicyStore)
-    [pscustomobject]@{Name=$Name;Enabled=$(if ($script:RejectFirewall) {'False'} else {'True'});Action='Allow';Direction='Inbound';Profile='Domain, Private'}
+    [CmdletBinding()]param([string[]]$Name,[string]$PolicyStore)
+    foreach ($item in $Name) { [pscustomobject]@{Name=$item;Enabled=$(if ($script:RejectFirewall) {'False'} else {'True'});Action='Allow';Direction='Inbound';Profile='Domain, Private'} }
 }
 function Set-NetFirewallRule {
+    [CmdletBinding()]
     param([string]$Name,[string]$Enabled,[string]$Action,[string]$Direction,[string]$Protocol,[int]$LocalPort)
     $script:FirewallWrites.Add([pscustomobject]@{Name=$Name;Port=$LocalPort;Protocol=$Protocol})
 }
@@ -119,7 +120,29 @@ Assert-Throws {Set-LabRdpFirewall} 'Ineffective RDP firewall writes must fail re
 $script:RunPath=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $script:RunPath | Out-Null
 function Invoke-Native { param($Program,$Arguments) $script:NativeArguments=$Arguments }
+function Get-NetFirewallPortFilter {
+    [CmdletBinding()]param([Parameter(ValueFromPipeline)]$InputObject)
+    process { [pscustomobject]@{Protocol=$(if ($InputObject.Name -like '*TCP') {6} else {17});LocalPort=3391} }
+}
+function Get-NetFirewallAddressFilter {
+    [CmdletBinding()]param([Parameter(ValueFromPipeline)]$InputObject)
+    process { [pscustomobject]@{LocalAddress='Any';RemoteAddress='192.0.2.0/24'} }
+}
+$script:HasListener=$true
+$script:Warnings=New-Object 'System.Collections.Generic.List[string]'
+function Get-NetTCPConnection {
+    [CmdletBinding()]param([string]$State,[int]$LocalPort)
+    if ($script:HasListener) { [pscustomobject]@{LocalPort=$LocalPort;State=$State} }
+}
 try {
+    $script:RejectFirewall=$false
+    Save-LabRdpState 'before'
+    $state=Get-Content (Join-Path $script:RunPath 'before-rdp.json') -Raw | ConvertFrom-Json
+    Assert-True ($state.Port -eq 3391 -and $state.Listening -and $state.FirewallPorts.Count -eq 2 -and $state.Members.Count -eq 1) 'RDP reports must retain listener, both port filters and group membership.'
+    Assert-True ($state.FirewallSources[0].RemoteAddress -eq '192.0.2.0/24') 'Existing firewall source restrictions must be visible in the report.'
+    $script:HasListener=$false
+    Save-LabRdpState 'after'
+    Assert-True ($script:Warnings.Count -eq 1) 'A missing post-Apply listener must produce an explicit verification warning.'
     @(
         "SeDenyRemoteInteractiveLogonRight = *$userSid,*S-1-5-113,*$outsiderSid",
         "SeDenyNetworkLogonRight = *S-1-5-32-545,*$outsiderSid",

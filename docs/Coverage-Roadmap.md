@@ -2,6 +2,8 @@
 
 Reviewed October 23, 2026 against the repository, both supplied Windows checklists and Microsoft documentation. No future image's scoring is known. This is a reusable framework with a scenario-specific profile; required apps, accounts, roles and services must be reconsidered with every README.
 
+November 13 update: the current schema 2 profile now supports required RDP through `EnableRemoteDesktop`, with coordinated services, firewall, membership and rights handling. See the root README for the current Round 2 accounts and six required apps. The matrix and priorities below describe the original October review except where that later RDP implementation supersedes them.
+
 ## Basics: what is covered and what remains
 
 | Area | Implemented behavior | Remaining boundary |
@@ -17,7 +19,7 @@ Reviewed October 23, 2026 against the repository, both supplied Windows checklis
 | Evidence/manual cleanup | Optional media/executable filename scan, tasks/startup/process/listener exports, accessibility evidence | Archive detection and exact approved cleanup remain gaps. Filename matches, timestamps and unsigned files alone do not prove malware. |
 | Verification | Existing backups, action results and inventory; optional registry-target comparison now added | No complete post-Apply compliance engine or automatic proof of remaining score items. |
 
-The checklists contain legacy and scenario-dependent advice. Do not install an alternate browser, remove Wireshark/Npcap, clear browser data, reset a proxy, change built-in account names or clear the pagefile merely because a checklist says so. These decisions depend on current requirements and evidence. The existing profile's Chrome/Wireshark/Npcap requirements apply only to the completed scenario.
+The checklists contain legacy and scenario-dependent advice. Do not install an alternate browser, remove Wireshark/Npcap, clear browser data, reset a proxy, change built-in account names or clear the pagefile merely because a checklist says so. These decisions depend on current requirements and evidence. The October profile's Wireshark/Npcap requirements do not apply to the new Round 2 README.
 
 [Microsoft: file-system auditing and SACLs](https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/audit-file-system).
 
