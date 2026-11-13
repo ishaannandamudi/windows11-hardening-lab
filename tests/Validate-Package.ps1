@@ -10,7 +10,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($source,[ref]$t
 if ($parseErrors.Count) { $parseErrors | Format-List; throw 'PowerShell parser errors.' }
 function Assert-True { param([bool]$Condition,[string]$Message) if (-not $Condition) { throw $Message } }
 function Assert-Throws { param([scriptblock]$Code) $threw=$false; try { & $Code | Out-Null } catch {$threw=$true}; Assert-True $threw 'Expected configuration rejection.' }
-foreach ($name in @('Resolve-LabConfigPath','Assert-ProfileProperties','Assert-ProfileInteger','Test-LabProfile','Assert-LabCapabilities','Get-AccountDisposition','Get-CryptoIndex','New-LabPassword','New-RegistryPlan','Set-AccountPolicy','Save-Json','Write-LabWarning','Invoke-LabChange','Invoke-Native')) {
+foreach ($name in @('Resolve-LabConfigPath','Assert-ProfileProperties','Assert-ProfileInteger','Test-LabProfile','Assert-LabCapabilities','Get-AccountDisposition','Get-CryptoIndex','New-LabPassword','New-RegistryPlan','Get-LabRdpSidClosure','Get-LabDenyPrincipals','Get-LabRestrictedGroups','Get-LabDisabledFirewallPatterns','Set-AccountPolicy','Save-Json','Write-LabWarning','Invoke-LabChange','Invoke-Native')) {
     $definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
     Assert-True ($null -ne $definition) "Missing helper $name"
     . ([scriptblock]::Create($definition.Extent.Text))
@@ -51,6 +51,7 @@ function New-TestProfile {
     $fixture.CreateUsers=@('newemployee')
     $fixture.ResetPasswordAccounts=@('labadmin')
     $fixture.RequiredServiceNames=@()
+    $fixture.EnableRemoteDesktop=$false
     $fixture.DisableServiceNames=@('RemoteRegistry')
     $fixture.RequiredFeatureNames=@()
     $fixture.DisableFeatureNames=@('IIS-WebServerRole','IIS-FTPServer')
@@ -77,7 +78,9 @@ foreach ($mutate in @(
     {param($p) $p.Users += 'labprimary'},
     {param($p) $p.Administrators=@('labadmin')},
     {param($p) $p.RemoveNonSystemShares='false'},
-    {param($p) $p.SchemaVersion='1'},
+    {param($p) $p.SchemaVersion='2'},
+    {param($p) $p.SchemaVersion=1},
+    {param($p) $p.EnableRemoteDesktop='true'},
     {param($p) $p.LockAfterSeconds=0},
     {param($p) $p.LockAfterSeconds=599941},
     {param($p) $p.LockAfterSeconds=600.5},
@@ -241,6 +244,7 @@ Assert-True ($script:Changes[0].Status -eq 'Failed' -and $script:Changes[0].Deta
 Assert-True ($script:Changes[1].Status -eq 'Applied' -and $script:Changes[2].Status -eq 'Planned' -and $script:Changes[3].Status -eq 'Planned') 'Action statuses are incorrect.'
 Assert-True ($script:Warnings.Count -eq 1) 'Failed actions must produce a warning.'
 # Test generated policy with harmless stubs; never invoke secedit or account cmdlets.
+$script:Profile = New-TestProfile
 $script:RunPath = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $script:RunPath | Out-Null
 function Get-LocalUser { [pscustomobject]@{SID=[Security.Principal.SecurityIdentifier]::new('S-1-5-21-100-200-300-501')} }

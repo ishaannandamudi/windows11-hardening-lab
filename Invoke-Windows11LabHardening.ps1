@@ -64,9 +64,10 @@ function Assert-ProfileInteger {
 function Test-LabProfile {
     param($Profile)
     $lists = @('Administrators','Users','CreateUsers','ResetPasswordAccounts','RequiredServiceNames','DisableServiceNames','RequiredFeatureNames','DisableFeatureNames','AllowedShareNames','ProtectedApplicationPatterns','ReviewApplicationPatterns','ApplicationPackageIds','AuditSubcategories','MediaExtensions','ReviewExecutableNames')
-    Assert-ProfileProperties $Profile (@('SchemaVersion','PrimaryAccount','PasswordPolicy','RemoveNonSystemShares','LockAfterSeconds') + $lists) 'Profile'
+    Assert-ProfileProperties $Profile (@('SchemaVersion','PrimaryAccount','PasswordPolicy','RemoveNonSystemShares','LockAfterSeconds','EnableRemoteDesktop') + $lists) 'Profile'
     Assert-ProfileInteger $Profile.SchemaVersion 'SchemaVersion'
-    if ($Profile.SchemaVersion -ne 1) { throw 'Unsupported profile schema.' }
+    if ($Profile.SchemaVersion -ne 2) { throw 'Use the schema 2 profile supplied with this script; older scenario profiles must be adapted explicitly.' }
+    if ($Profile.EnableRemoteDesktop -isnot [bool]) { throw 'EnableRemoteDesktop must be JSON true or false.' }
     if ($Profile.PrimaryAccount -isnot [string] -or [string]::IsNullOrWhiteSpace($Profile.PrimaryAccount)) { throw 'PrimaryAccount must be a nonempty account name.' }
     if ($Profile.RemoveNonSystemShares -isnot [bool]) { throw 'RemoveNonSystemShares must be JSON true or false, without quotes.' }
     Assert-ProfileInteger $Profile.LockAfterSeconds 'LockAfterSeconds'
@@ -122,7 +123,7 @@ function Test-LabProfile {
         if ($name -notmatch '^[^\\/:*?"<>|]+\.exe$') { throw "ReviewExecutableNames must contain exact .exe filenames: $name" }
     }
     foreach ($name in $Profile.RequiredServiceNames) {
-        if ($name -in @('TermService','SessionEnv','UmRdpService','WinRM')) {
+        if ($name -eq 'WinRM' -or (-not $Profile.EnableRemoteDesktop -and $name -in @('TermService','SessionEnv','UmRdpService'))) {
             throw "Required service $name conflicts with this baseline's remote-access registry/firewall settings. Adapt those modules before Apply; a service exemption alone is insufficient."
         }
         $dependencies = switch ($name) {
@@ -134,6 +135,12 @@ function Test-LabProfile {
             if ($feature -in $Profile.DisableFeatureNames -and $feature -notin $Profile.RequiredFeatureNames) {
                 throw "Required service $name conflicts with disabling feature $feature. Review the service and feature requirements together."
             }
+        }
+    }
+    if ($Profile.EnableRemoteDesktop) {
+        if ('TermService' -notin $Profile.RequiredServiceNames) { throw 'Required RDP must include TermService in RequiredServiceNames.' }
+        foreach ($name in @('TermService','SessionEnv','UmRdpService')) {
+            if ($name -in $Profile.DisableServiceNames) { throw "RDP is required but $name is in DisableServiceNames." }
         }
     }
 }
@@ -295,7 +302,8 @@ function New-RegistryPlan {
         @($lsa,'NoLMHash',1), @($lsa,'LmCompatibilityLevel',5), @($lsa,'DisableDomainCreds',1),
         @($lsa,'SCENoApplyLegacyAuditPolicy',1),
         @('HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest','UseLogonCredential',0),
-        @('HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server','fDenyTSConnections',1),
+        @('HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server','fDenyTSConnections',$(if ($script:Profile.EnableRemoteDesktop) {0} else {1})),
+        @('HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services','fDenyTSConnections',$(if ($script:Profile.EnableRemoteDesktop) {0} else {1})),
         @('HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance','fAllowToGetHelp',0),
         @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer','NoDriveTypeAutoRun',255),
         @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer','NoAutorun',1),
@@ -312,6 +320,13 @@ function New-RegistryPlan {
         @('HKLM:\SOFTWARE\Policies\Google\Chrome','DownloadRestrictions',4)
     )
     foreach ($s in $settings) { [pscustomobject]@{Path=$s[0];Name=$s[1];Value=$s[2];Type='DWord'} }
+    if ($script:Profile.EnableRemoteDesktop) {
+        foreach ($path in @('HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp','HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services')) {
+            foreach ($item in @(@('UserAuthentication',1),@('SecurityLayer',2),@('MinEncryptionLevel',3))) {
+                [pscustomobject]@{Path=$path;Name=$item[0];Value=$item[1];Type='DWord'}
+            }
+        }
+    }
     [pscustomobject]@{Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\System';Name='ShellSmartScreenLevel';Value='Warn';Type='String'}
     [pscustomobject]@{Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging\ModuleNames';Name='*';Value='*';Type='String'}
 }
@@ -361,19 +376,67 @@ function Set-LabPassword {
     } finally { $password.Dispose() }
 }
 
+function Get-LabRdpSidClosure {
+    param([string[]]$AccountSids,[object[]]$Memberships)
+    # Token groups shared by authenticated local/RDP users, including the local-
+    # account SIDs that are sometimes used to deny all local RDP sign-ins.
+    $sids = @($AccountSids) + @('S-1-1-0','S-1-2-0','S-1-5-2','S-1-5-4','S-1-5-11','S-1-5-14','S-1-5-113','S-1-5-114','S-1-5-32-544','S-1-5-32-545','S-1-5-32-555')
+    do {
+        $added = $false
+        foreach ($membership in $Memberships) {
+            if ($membership.MemberSid -in $sids -and $membership.GroupSid -notin $sids) { $sids += $membership.GroupSid; $added=$true }
+        }
+    } while ($added)
+    return @($sids | Sort-Object -Unique)
+}
+
+function Get-LabDenyPrincipals {
+    param([string[]]$Existing,[string[]]$GuestPrincipals,[string[]]$PermittedSids=@())
+    foreach ($principal in @($Existing) + @($GuestPrincipals) | Sort-Object -Unique) {
+        $sid = $principal.TrimStart('*')
+        if ($sid -notmatch '^S-\d-') {
+            # Secedit usually exports SIDs. Resolve named assignments when possible;
+            # retain unresolved identities rather than deleting an unknown denial.
+            try { $sid = ([Security.Principal.NTAccount]::new($sid)).Translate([Security.Principal.SecurityIdentifier]).Value }
+            catch { $sid = '' }
+        }
+        if ($principal -in $GuestPrincipals -or $sid -notin $PermittedSids) { $principal }
+    }
+}
+
 function Set-AccountPolicy {
     $p = $script:Profile.PasswordPolicy
     $guest = Get-LocalUser | Where-Object {$_.SID.Value -match '-501$'} | Select-Object -First 1
     $guestSid = if ($guest) { [string]$guest.SID } else { '' }
     $denyGuest = @('*S-1-5-32-546')
     if ($guestSid) { $denyGuest += "*$guestSid" }
+    $rdpSids = @()
+    if ($script:Profile.EnableRemoteDesktop) {
+        $authorizedSids = @(foreach ($name in @($script:Profile.Administrators) + @($script:Profile.Users)) {
+            $user = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
+            if ($user) { [string]$user.SID }
+        })
+        $memberships = @(foreach ($group in Get-LocalGroup) {
+            foreach ($member in Get-LocalGroupMember -Group $group.Name) { [pscustomobject]@{GroupSid=[string]$group.SID;MemberSid=[string]$member.SID} }
+        })
+        $rdpSids = @(Get-LabRdpSidClosure $authorizedSids $memberships)
+    }
+    $denyAdjustments = New-Object 'System.Collections.Generic.List[object]'
     $denyLines = foreach ($right in @('SeDenyInteractiveLogonRight','SeDenyNetworkLogonRight','SeDenyRemoteInteractiveLogonRight')) {
-        # Preserve pre-existing deny assignments rather than silently widening access.
+        # Keep unrelated denials. Required RDP must not retain a broad/direct denial
+        # of authorized employees; deny rights override allow/group assignments.
         $existing = Select-String -LiteralPath (Join-Path $script:RunPath 'security-before.inf') -Pattern "^$right\s*=" | Select-Object -First 1
-        $principals = @($denyGuest)
-        if ($existing) { $principals += @((($existing.Line -split '=',2)[1] -split ',') | ForEach-Object {$_.Trim()} | Where-Object {$_}) }
+        $previous = @()
+        if ($existing) { $previous = @((($existing.Line -split '=',2)[1] -split ',') | ForEach-Object {$_.Trim()} | Where-Object {$_}) }
+        $permitted = if ($right -ne 'SeDenyInteractiveLogonRight') { $rdpSids } else { @() }
+        $principals = @(Get-LabDenyPrincipals $previous $denyGuest $permitted)
+        foreach ($removed in $previous | Where-Object {$_ -notin $principals}) {
+            $denyAdjustments.Add([pscustomobject]@{Right=$right;Principal=$removed;Reason='Conflicts with scenario-required employee RDP access'})
+        }
         "$right = $((@($principals | Sort-Object -Unique)) -join ',')"
     }
+    Save-Json 'rdp-deny-adjustments.json' ($denyAdjustments.ToArray())
+    $remoteLogonRight = if ($script:Profile.EnableRemoteDesktop) { 'SeRemoteInteractiveLogonRight = *S-1-5-32-544,*S-1-5-32-555' } else { '' }
     $inf = @"
 [Unicode]
 Unicode=yes
@@ -398,11 +461,88 @@ SeDebugPrivilege = *S-1-5-32-544
 SeBackupPrivilege = *S-1-5-32-544
 SeRestorePrivilege = *S-1-5-32-544
 SeTakeOwnershipPrivilege = *S-1-5-32-544
+$remoteLogonRight
 $($denyLines -join "`r`n")
 "@
     $path = Join-Path $script:RunPath 'security-target.inf'
     $inf | Set-Content -LiteralPath $path -Encoding Unicode
     Invoke-Native 'secedit.exe' @('/configure','/db',(Join-Path $script:RunPath 'security-target.sdb'),'/cfg',$path,'/overwrite','/areas','SECURITYPOLICY','USER_RIGHTS','/log',(Join-Path $script:RunPath 'security-apply.log'),'/quiet') | Out-Null
+}
+
+function Get-LabRestrictedGroups {
+    @('S-1-5-32-547','S-1-5-32-551','S-1-5-32-546')
+    if (-not $script:Profile.EnableRemoteDesktop) { 'S-1-5-32-555' }
+}
+
+function Get-LabDisabledFirewallPatterns {
+    @('FPS-*','NETDIS-*','RemoteAssistance*','WINRM-*','WMI-*')
+    if (-not $script:Profile.EnableRemoteDesktop) { 'RemoteDesktop*' }
+}
+
+function Set-LabRdpMembership {
+    $group = Get-LocalGroup -SID 'S-1-5-32-555'
+    $allowed = @($script:Profile.Administrators) + @($script:Profile.Users)
+    $users = @(foreach ($name in $allowed) { Get-LocalUser -Name $name -ErrorAction SilentlyContinue })
+    $allowedSids = @($users | ForEach-Object {[string]$_.SID})
+    foreach ($member in Get-LocalGroupMember -Group $group.Name) {
+        if ([string]$member.SID -notin $allowedSids) { Remove-LocalGroupMember -Group $group.Name -Member $member }
+    }
+    foreach ($user in $users | Where-Object {$_.Name -in $script:Profile.Users}) {
+        if ([string]$user.SID -notin @(Get-LocalGroupMember -Group $group.Name | ForEach-Object {[string]$_.SID})) {
+            Add-LocalGroupMember -Group $group.Name -Member $user
+        }
+    }
+}
+
+function Set-LabRdpServices {
+    foreach ($name in @('TermService','SessionEnv','UmRdpService')) {
+        $service = Get-Service -Name $name
+        if ($name -eq 'TermService') {
+            if ($service.StartType -ne 'Automatic') { Set-Service -Name $name -StartupType Automatic }
+            if ($service.Status -ne 'Running') { Start-Service -Name $name }
+            $verified = Get-Service -Name $name
+            if ($verified.Status -ne 'Running' -or $verified.StartType -ne 'Automatic') { throw 'TermService did not reach Running/Automatic.' }
+        } elseif ($service.StartType -eq 'Disabled') {
+            # Leave supporting services trigger-start/manual unless explicitly disabled.
+            Set-Service -Name $name -StartupType Manual
+        }
+    }
+}
+
+function Set-LabRdpFirewall {
+    $port = [int](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name PortNumber).PortNumber
+    if ($port -lt 1 -or $port -gt 65535) { throw 'Invalid configured RDP listener port. Review it manually.' }
+    foreach ($protocol in @('TCP','UDP')) {
+        $name = "RemoteDesktop-UserMode-In-$protocol"
+        $rule = Get-NetFirewallRule -Name $name -ErrorAction Stop
+        if (-not $rule) { throw "Required built-in RDP rule $name is missing; no broad replacement rule was created." }
+        # Keep source-address, program, service and profile restrictions. Match the
+        # existing listener port rather than resetting a custom port to 3389.
+        Set-NetFirewallRule -Name $name -Enabled True -Action Allow -Direction Inbound -Protocol $protocol -LocalPort $port
+        $verified = Get-NetFirewallRule -PolicyStore ActiveStore -Name $name -ErrorAction Stop
+        if ([string]$verified.Enabled -ne 'True' -or [string]$verified.Action -ne 'Allow' -or [string]$verified.Direction -ne 'Inbound') { throw "RDP firewall rule $name did not become an active inbound allow rule." }
+    }
+}
+
+function Save-LabRdpState {
+    param([string]$Prefix)
+    $path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+    $listener = Get-ItemProperty -LiteralPath $path
+    $port = [int]$listener.PortNumber
+    $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name 'RemoteDesktop-UserMode-In-TCP','RemoteDesktop-UserMode-In-UDP' -ErrorAction Stop)
+    $state = [pscustomobject]@{
+        Note='Stored configuration/local listener evidence; verify an actual employee RDP sign-in from another computer. Existing rule profile/source restrictions and other block rules can still affect access.'
+        Port=$port
+        Listening=@(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue).Count -gt 0
+        ListenerSettings=$listener | Select-Object UserAuthentication,SecurityLayer,MinEncryptionLevel
+        Services=@(Get-Service -Name TermService,SessionEnv,UmRdpService | Select-Object Name,Status,StartType)
+        FirewallRules=@($rules | Select-Object Name,Enabled,Action,Direction,Profile)
+        FirewallPorts=@($rules | Get-NetFirewallPortFilter | Select-Object Protocol,LocalPort)
+        FirewallSources=@($rules | Get-NetFirewallAddressFilter | Select-Object LocalAddress,RemoteAddress)
+        Members=@(Get-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-555').Name | Select-Object Name,@{n='SID';e={[string]$_.SID}})
+    }
+    Save-Json "$Prefix-rdp.json" $state
+    if ($Prefix -eq 'after' -and -not $state.Listening) { Write-LabWarning 'RDP has no local TCP listener yet. Restart manually if needed, then verify RDP before considering this scenario complete.' }
 }
 
 function Find-ReviewFiles {
@@ -457,7 +597,7 @@ if ($os.ProductType -ne 1 -or [int]$os.BuildNumber -lt 22000) { throw 'This prof
 $edition = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID
 if ($edition -like 'Core*') { throw 'Use Windows 11 Pro, Education or Enterprise; this package relies on local security-policy tools.' }
 if ($computer.PartOfDomain) { throw 'This local-account lab profile must not run on a domain-joined computer.' }
-if ($env:SESSIONNAME -like 'RDP*' -or (Get-Variable PSSenderInfo -ErrorAction SilentlyContinue)) { throw 'Use the VM console; this profile disables remote management.' }
+if ($env:SESSIONNAME -like 'RDP*' -or (Get-Variable PSSenderInfo -ErrorAction SilentlyContinue)) { throw 'Use the VM console while changing passwords, sign-in rights and firewall settings, including when this scenario requires RDP.' }
 $ConfigPath = Resolve-LabConfigPath -Path $ConfigPath -ScriptDirectory $PSScriptRoot
 $script:Profile = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 Test-LabProfile $script:Profile
@@ -465,6 +605,7 @@ $requiredCommands = @('Get-LocalUser','New-LocalUser','Set-LocalUser','Enable-Lo
 if ($UpdateApps) { $requiredCommands += 'winget.exe' }
 if ($UpdateDefender) { $requiredCommands += 'Update-MpSignature' }
 if ($QuickScan) { $requiredCommands += 'Start-MpScan' }
+if ($script:Profile.EnableRemoteDesktop) { $requiredCommands += @('Set-NetFirewallRule','Get-NetFirewallPortFilter','Get-NetFirewallAddressFilter','Get-NetTCPConnection') }
 Assert-LabCapabilities $requiredCommands
 $advancedAuditModule = Join-Path $PSScriptRoot 'modules\Lab.AdvancedAudit.psm1'
 if ($AdvancedAudit -and -not (Test-Path -LiteralPath $advancedAuditModule -PathType Leaf)) {
@@ -518,6 +659,9 @@ try {
     Save-RegistryBefore $registryPlan
     # These commands only export settings. Backups are mandatory before remediation.
     Save-LabBackups
+    if ($script:Profile.EnableRemoteDesktop) {
+        try { Save-LabRdpState 'before' } catch { Write-LabWarning "RDP before-state collection: $($_.Exception.Message)" }
+    }
     if ($AdvancedAudit) {
         try {
             Import-Module -Name $advancedAuditModule -Force -ErrorAction Stop
@@ -573,14 +717,17 @@ try {
             Invoke-LabChange 'RemoveAdmin' $member.Name 'Remove unauthorized administrator membership' { Remove-LocalGroupMember -Group $adminGroup.Name -Member $member }
         }
     }
-    # No RDP, Backup Operators, Power Users or guest privileges are authorized in this profile.
-    foreach ($groupSid in @('S-1-5-32-547','S-1-5-32-551','S-1-5-32-555','S-1-5-32-546')) {
+    # Required RDP has its own authorized membership plan; other privilege cleanup remains.
+    foreach ($groupSid in Get-LabRestrictedGroups) {
         $group = Get-LocalGroup -SID $groupSid -ErrorAction SilentlyContinue
         if (-not $group) { continue }
         foreach ($member in Get-LocalGroupMember -Group $group.Name) {
             if ([string]$member.SID -match '-501$' -and $groupSid -eq 'S-1-5-32-546') { continue }
             Invoke-LabChange 'RemovePrivilege' "$($group.Name): $($member.Name)" 'Remove unneeded privileged/guest group membership' { Remove-LocalGroupMember -Group $group.Name -Member $member }
         }
+    }
+    if ($script:Profile.EnableRemoteDesktop) {
+        Invoke-LabChange 'RdpMembership' 'Remote Desktop Users' 'Allow authorized employees and remove unauthorized RDP group members' { Set-LabRdpMembership }
     }
 
     Invoke-LabChange 'AccountPolicy' 'Local security policy' 'Enforce password/lockout policy and restrict selected user rights while preserving service identities' { Set-AccountPolicy }
@@ -590,11 +737,14 @@ try {
     Invoke-LabChange 'Firewall' 'All profiles' 'Enable firewall; block unsolicited inbound, allow outbound, preserve core rules and log dropped traffic' {
         Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Allow -AllowInboundRules True -NotifyOnListen True -LogBlocked True -LogMaxSizeKilobytes 32767
     }
-    $rulePatterns = @('FPS-*','NETDIS-*','RemoteDesktop*','RemoteAssistance*','WINRM-*','WMI-*')
+    $rulePatterns = @(Get-LabDisabledFirewallPatterns)
     foreach ($rule in Get-NetFirewallRule -Direction Inbound -Enabled True) {
         $disable = $false
         foreach ($pattern in $rulePatterns) { if ($rule.Name -like $pattern) { $disable = $true } }
         if ($disable -and $rule.DisplayName -notmatch '(?i)ccs|cyberpatriot') { Invoke-LabChange 'FirewallRule' $rule.Name 'Disable unnecessary inbound management/discovery/sharing rule' { Disable-NetFirewallRule -Name $rule.Name } }
+    }
+    if ($script:Profile.EnableRemoteDesktop) {
+        Invoke-LabChange 'RdpFirewall' 'Built-in RDP TCP/UDP rules' 'Enable required RDP rules on the existing listener port; preserve source/profile restrictions' { Set-LabRdpFirewall }
     }
     foreach ($subcategory in $script:Profile.AuditSubcategories) {
         Invoke-LabChange 'Audit' $subcategory 'Enable success and failure auditing' { Invoke-Native 'auditpol.exe' @('/set',"/subcategory:$subcategory",'/success:enable','/failure:enable') | Out-Null }
@@ -610,6 +760,9 @@ try {
                 if ((Get-Service -Name $name).Status -ne 'Stopped') { Stop-Service -Name $name }
             }
         }
+    }
+    if ($script:Profile.EnableRemoteDesktop) {
+        Invoke-LabChange 'RdpServices' 'Remote Desktop services' 'Keep TermService running/automatic and supporting RDP services available' { Set-LabRdpServices }
     }
     $availableFeatures = @{}
     try { foreach ($f in Get-WindowsOptionalFeature -Online) { $availableFeatures[$f.FeatureName] = $f } }
@@ -652,10 +805,10 @@ try {
     if ($QuickScan) { Invoke-LabChange 'DefenderScan' 'Quick scan' 'Run Defender quick scan; its configured remediation may quarantine detections' { Start-MpScan -ScanType QuickScan } }
     if ($UpdateApps) {
         foreach ($packageId in $script:Profile.ApplicationPackageIds) {
-            Invoke-LabChange 'ApplicationUpdate' $packageId 'Upgrade this required application using its exact WinGet package ID' {
+            Invoke-LabChange 'ApplicationUpdate' $packageId 'Open the x64 update installer; choose Do not close applications and defer reboot' {
                 if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) { throw 'WinGet is unavailable; update from the vendor manually.' }
                 # Do not install missing apps, accept new agreements, upgrade all, or permit reboot.
-                Invoke-Native 'winget.exe' @('upgrade','--id',$packageId,'--exact','--source','winget','--silent','--disable-interactivity') -OutputPath (Join-Path $script:RunPath "$packageId-upgrade.txt") | Out-Null
+                Invoke-Native 'winget.exe' @('upgrade','--id',$packageId,'--exact','--source','winget','--architecture','x64','--interactive') -OutputPath (Join-Path $script:RunPath "$packageId-upgrade.txt") | Out-Null
             }
         }
     }
@@ -673,7 +826,12 @@ try {
     Write-LabWarning 'Chrome defaults require per-user verification in Settings > Apps > Default apps > Google Chrome. No UserChoice protection or JavaScript settings were changed.'
     Write-LabWarning 'Review applications, per-user installs, Defender exclusions, scheduled tasks, startup entries, shares, user rights and forensic evidence manually. File and malware findings are not automatically deleted.'
     Write-LabWarning 'Primary/current/auto-login passwords stay unchanged. Expiration is enabled for authorized accounts; an old password can become due at the next sign-in.'
-    if ($Mode -eq 'Apply' -and -not $WhatIfPreference) { Save-Inventory 'after'; $script:RebootNeeded = $true }
+    if ($Mode -eq 'Apply' -and -not $WhatIfPreference) {
+        Save-Inventory 'after'; $script:RebootNeeded = $true
+        if ($script:Profile.EnableRemoteDesktop) {
+            try { Save-LabRdpState 'after' } catch { Write-LabWarning "RDP after-state collection: $($_.Exception.Message)" }
+        }
+    }
 } catch {
     $script:Changes.Add([pscustomobject]@{Id='Fatal';Target='Run';Description='Run stopped by a terminating error';Status='Failed';Detail=$_.Exception.Message})
     throw

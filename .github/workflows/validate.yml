@@ -13,3 +13,6 @@ jobs:
       - name: Test read-only advanced audit and its report isolation
         shell: powershell
         run: .\tests\Validate-AdvancedAudit.ps1
+      - name: Test required RDP and interactive update scenario without remediation
+        shell: powershell
+        run: .\tests\Validate-RdpScenario.ps1
