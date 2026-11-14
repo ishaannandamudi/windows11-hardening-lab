@@ -75,7 +75,7 @@ try {
     Assert-True ($script:Preference.SubmitSamplesConsent -eq 1 -and @($result | Where-Object Status -eq 'Failed').Count -eq 0) 'A successful explicit sample-submission change must pass readback.'
     $plan.Tasks=@(); $plan.EnableSafeSampleSubmission=$false
     $again=@(Invoke-LabReviewedCleanup -Plan $plan -OutputDirectory $temp -Mode Apply)
-    Assert-True (@($again | Where-Object Status -eq 'AlreadyAbsent').Count -eq 2) 'Repeated cleanup must report already-absent files/exclusions, not mutate other targets.'
+    Assert-True (@($again | Where-Object Status -eq 'AlreadyAbsent').Count -eq 1 -and @($again | Where-Object Status -eq 'NotListed').Count -eq 1) 'Missing files and unlisted/possibly hidden exclusions must remain distinct without mutating other targets.'
     $plan.Files=@(); $plan.DefenderExclusions=@(); $plan.EnableSafeSampleSubmission=$true; $script:BlockWrites=$true; $script:Preference.SubmitSamplesConsent=2
     $blocked=@(Invoke-LabReviewedCleanup -Plan $plan -OutputDirectory $temp -Mode Apply)
     Assert-True ($blocked[0].Status -eq 'Failed' -and $blocked[0].Detail -like '*overridden/blocked*') 'Silent Defender policy/tamper overrides must be reported as failed readback.'
@@ -83,5 +83,23 @@ try {
     $script:Preference.ExclusionPath+= 'C:\Program Files\Other\other.exe'
     $blocked=@(Invoke-LabReviewedCleanup -Plan $plan -OutputDirectory $temp -Mode Apply)
     Assert-True ($blocked[0].Status -eq 'Failed') 'Blocked exclusion removal must not claim success.'
+    # Process cleanup must use the reviewed image, never just a matching name/PID.
+    $exe=Join-Path $temp 'renamed.exe'
+    'synthetic executable, never run' | Set-Content -LiteralPath $exe
+    function Get-AuthenticodeSignature { [CmdletBinding()]param($LiteralPath) [pscustomobject]@{Status=$script:FixtureSignature} }
+    $script:FixtureSignature='Valid'
+    $plan=New-Plan
+    $plan.Files=@([pscustomobject]@{Path=$exe;SHA256=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash;AllowSystemPath=$false;StopMatchingProcesses=$true})
+    Assert-Throws {Test-LabCleanupPlan $plan} 'Validly signed executable files must require manual software review.'
+    $script:FixtureSignature='NotSigned'
+    $script:GoodProcess=[pscustomobject]@{Path=$exe;HasExited=$false}
+    $script:GoodProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {param($Timeout) return $this.HasExited}
+    $script:OtherProcess=[pscustomobject]@{Path=(Join-Path $temp 'elsewhere\renamed.exe');HasExited=$false}
+    $script:ProcessStops=0
+    function Get-Process { [CmdletBinding()]param() $script:GoodProcess; $script:OtherProcess }
+    function Stop-Process { [CmdletBinding()]param($InputObject) $script:ProcessStops++; $InputObject.HasExited=$true }
+    $result=@(Invoke-LabReviewedCleanup -Plan $plan -OutputDirectory $temp -Mode Apply)
+    Assert-True ($script:ProcessStops -eq 1 -and $script:GoodProcess.HasExited -and -not $script:OtherProcess.HasExited -and -not (Test-Path -LiteralPath $exe)) 'Only the matching reviewed image may be stopped/deleted.'
+    Remove-Item Function:\Get-Process,Function:\Stop-Process,Function:\Get-AuthenticodeSignature
 } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
 Write-Host 'PASS: hash/path/computer/forensic guards, exact task actions, Audit/WhatIf isolation, literal temporary-file removal, preserved exclusions and Defender readback. Windows actions stubbed.'

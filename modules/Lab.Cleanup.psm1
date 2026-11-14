@@ -36,7 +36,7 @@ function Get-LabCleanupFile {
     if (-not $ordinary -and -not $systemException) { throw "Path is outside allowed cleanup roots. Only an explicitly allowed non-core System32 .exe exception is supported: $path" }
     $current=$path
     while ($current) {
-        if (Test-Path -LiteralPath $current) {
+        if (Test-Path -LiteralPath $current -ErrorAction Stop) {
             $component=Get-Item -LiteralPath $current -Force -ErrorAction Stop
             if ($component.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Reparse-point target/ancestor is not allowed: $current" }
         }
@@ -44,7 +44,7 @@ function Get-LabCleanupFile {
         if ($parent -eq $current) { break }
         $current=$parent
     }
-    if (-not (Test-Path -LiteralPath $path)) { return [pscustomobject]@{Path=$path;Status='AlreadyAbsent';SHA256=$Entry.SHA256} }
+    if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) { return [pscustomobject]@{Path=$path;Status='AlreadyAbsent';SHA256=$Entry.SHA256} }
     $file=Get-Item -LiteralPath $path -Force -ErrorAction Stop
     if ($file.PSIsContainer) { throw "Directories cannot be deleted: $path" }
     $hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash
@@ -92,7 +92,7 @@ function Test-LabCleanupPlan {
         if ($task.TaskName -match '[\\/*?\[\]]' -or $task.TaskPath -notmatch '^\\([^\\*?\[\]]+\\)*$' -or $task.TaskPath -like '\Microsoft\*' -or (Test-LabCleanupProtectedName ($task.TaskPath+$task.TaskName+$task.ExpectedExecute))) { throw 'Protected or nonliteral task identity.' }
         if (-not $seen.Add('Task:'+ $task.TaskPath+$task.TaskName)) { throw 'Repeated cleanup task.' }
         $image=[Environment]::ExpandEnvironmentVariables($task.ExpectedExecute).Trim('"')
-        if ($image -notin @($Plan.Files | ForEach-Object Path)) { throw 'A task must point directly to a hash-reviewed file in this plan.' }
+        if ($image -notin @($Plan.Files | ForEach-Object {$_.Path})) { throw 'A task must point directly to a hash-reviewed file in this plan.' }
         Get-LabCleanupTask $task | Out-Null
     }
     foreach ($exclusion in $Plan.DefenderExclusions) {
@@ -159,7 +159,7 @@ function Invoke-LabReviewedCleanup {
             $property='Exclusion'+$entry.Kind
             $current=Get-MpPreference -ErrorAction Stop
             $status='Planned'
-            if ($entry.Value -notin @($current.$property)) { $status='AlreadyAbsent' }
+            if ($entry.Value -notin @($current.$property)) { $status='NotListed' }
             elseif ($Mode -eq 'Apply' -and $PSCmdlet.ShouldProcess($target,'Remove this single reviewed antivirus exclusion')) {
                 $arguments=@{ErrorAction='Stop'}; $arguments[$property]=$entry.Value
                 Remove-MpPreference @arguments
@@ -167,7 +167,7 @@ function Invoke-LabReviewedCleanup {
                 if ($entry.Value -in @($current.$property)) { throw 'Exclusion removal was blocked or overridden; no success claimed.' }
                 $status='Applied'
             }
-            $results.Add([pscustomobject]@{Action=$stage;Target=$target;Status=$status;Detail='Other exclusions preserved.'})
+            $results.Add([pscustomobject]@{Action=$stage;Target=$target;Status=$status;Detail='Other exclusions preserved. NotListed means not visible in preferences; hidden/policy exclusions require separate verification.'})
         }
         if ($Plan.EnableSafeSampleSubmission) {
             $stage='SafeSampleSubmission'; $target='SubmitSamplesConsent'

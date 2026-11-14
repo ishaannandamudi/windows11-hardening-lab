@@ -4,6 +4,8 @@ Reviewed October 23, 2026 against the repository, both supplied Windows checklis
 
 November 13 update: the current schema 2 profile now supports required RDP through `EnableRemoteDesktop`, with coordinated services, firewall, membership and rights handling. See the root README for the current Round 2 accounts and six required apps. The matrix and priorities below describe the original October review except where that later RDP implementation supersedes them.
 
+November 13 follow-up: [expanded review and exact-target cleanup](Reviewed-Cleanup.md) now cover the observed MP3/backdoor/exclusion gaps. `Audit.ps1` includes the media scan, and `-ExtendedReview` correlates shell commands, listeners and persistence with exclusions, checks sample-submission/notification policies, and highlights duplicate registrations. The separate cleanup helper is explicit-plan only. [Observed results](Round2-Lessons.md) remain 95/100. Windows Update is manual by default. The earlier matrix boundaries below are historical; current behavior is described in those documents.
+
 ## Basics: what is covered and what remains
 
 | Area | Implemented behavior | Remaining boundary |

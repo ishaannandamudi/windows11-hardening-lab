@@ -45,6 +45,7 @@ try {
         startup=@([pscustomobject]@{Name='SecurityHealth';Command='%windir%\System32\SecurityHealthSystray.exe'})
         exclusions=@([pscustomobject]@{ExclusionPath=@('C:\Windows\System32\renamed.exe');ExclusionProcess=@();ExclusionExtension=@('exe');PUAProtection=1;MAPSReporting=2;SubmitSamplesConsent=2;DisableBlockAtFirstSeen=$false})
         defender=@([pscustomobject]@{IsTamperProtected=$true})
+        effectivefirewall=@([pscustomobject]@{Name='Public';Enabled='False'})
     }
     foreach ($name in $snapshots.Keys) { ConvertTo-Json -InputObject $snapshots[$name] -Depth 8 | Set-Content -LiteralPath (Join-Path $temp ("before-$name.json")) }
     ConvertTo-Json -InputObject @([pscustomobject]@{Name='Fixture';Version='1'},[pscustomobject]@{Name='Fixture';Version='2'}) | Set-Content (Join-Path $temp 'applications.json')
@@ -57,6 +58,7 @@ try {
     $findings=Get-Content (Join-Path $temp 'extended-findings.json') -Raw | ConvertFrom-Json
     Assert-True ($evidence.ShellCandidates.Count -eq 2 -and $evidence.ShellCandidates[0].ListeningPorts[0] -eq 41111) 'Process-to-port correlation and matching task must survive serialization.'
     Assert-True ($evidence.Exclusions[0].RelatedShellCommands.Count -eq 2) 'Exact exclusion must be connected to both process and persistence evidence.'
+    Assert-True (@($findings | Where-Object Area -eq 'FirewallPolicy').Count -eq 1) 'Disabled effective firewall must be surfaced even when persistent preference writes were successful.'
     Assert-True (@($findings | Where-Object Area -eq 'DefenderPolicy').Count -eq 1) 'Never-send policy must produce an actionable review item.'
     Assert-True (@($findings | Where-Object Area -eq 'Applications').Count -eq 1) 'Duplicate registrations need review, not automatic uninstall.'
     Remove-Item -LiteralPath (Join-Path $temp 'before-processes.json')

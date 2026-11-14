@@ -251,6 +251,7 @@ function Save-Inventory {
         udp = { Get-NetUDPEndpoint | Select-Object LocalAddress,LocalPort,OwningProcess }
         processes = { Get-CimInstance Win32_Process | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine }
         shares = { Get-SmbShare | Select-Object Name,Path,Description,Special,@{n='Access';e={@(Get-SmbShareAccess -Name $_.Name | Select-Object AccountName,AccessControlType,AccessRight)}} }
+        effectivefirewall = { Get-NetFirewallProfile -PolicyStore ActiveStore | Select-Object Name,Enabled,DefaultInboundAction,DefaultOutboundAction,DisabledInterfaceAliases }
         firewall = { Get-NetFirewallProfile | Select-Object Name,Enabled,DefaultInboundAction,DefaultOutboundAction,AllowInboundRules,LogBlocked,LogFileName }
         defender = { Get-MpComputerStatus | Select-Object AMRunningMode,AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,BehaviorMonitorEnabled,IoavProtectionEnabled,AntivirusSignatureLastUpdated,IsTamperProtected }
         eventlog = { Get-WinEvent -ListLog Security | Select-Object LogName,IsEnabled,MaximumSizeInBytes,LogMode }
@@ -759,6 +760,10 @@ try {
     }
     Invoke-LabChange 'Firewall' 'All profiles' 'Enable firewall; block unsolicited inbound, allow outbound, preserve core rules and log dropped traffic' {
         Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Allow -AllowInboundRules True -NotifyOnListen True -LogBlocked True -LogMaxSizeKilobytes 32767
+        $effective = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
+        if ($effective.Count -ne 3 -or @($effective | Where-Object {[string]$_.Enabled -ne 'True'}).Count -gt 0 -or @(@('Domain','Private','Public') | Where-Object {$_ -notin $effective.Name}).Count -gt 0) {
+            throw 'Firewall enable request did not pass ActiveStore readback. Inspect effective profiles and local Group Policy; policy refresh can override local preferences. Required RDP rules were not reset.'
+        }
     }
     $rulePatterns = @(Get-LabDisabledFirewallPatterns)
     foreach ($rule in Get-NetFirewallRule -Direction Inbound -Enabled True) {

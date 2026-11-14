@@ -13,7 +13,8 @@ function Get-LabReviewFileInventory {
     $skip=if ($ExcludeRoot) {[IO.Path]::GetFullPath($ExcludeRoot).TrimEnd('\')+'\'} else {''}
     foreach ($root in $Roots) {
         Write-Host "[Inspecting files] $root"
-        if (-not (Test-Path -LiteralPath $root)) { continue }
+        try { if (-not (Test-Path -LiteralPath $root -ErrorAction Stop)) { continue } }
+        catch { $issues.Add([pscustomobject]@{Path=$root;Status='Unreadable';Detail=$_.Exception.Message}); continue }
         $pending.Push($root)
         while ($pending.Count) {
             $directory=$pending.Pop()
@@ -91,7 +92,7 @@ function Invoke-LabExtendedReview {
         param([string]$Area,[string]$Target,[string]$Detail,[string]$Priority='Review')
         $findings.Add([pscustomobject]@{Priority=$Priority;Area=$Area;Target=$Target;Detail=$Detail})
     }
-    foreach ($name in @('processes','listeners','tasks','services','startup','exclusions','defender')) {
+    foreach ($name in @('processes','listeners','tasks','services','startup','exclusions','defender','effectivefirewall')) {
         try {
             $path=Join-Path $OutputDirectory ("before-$name.json")
             $rows=ConvertFrom-Json -InputObject (Get-Content -LiteralPath $path -Raw -ErrorAction Stop) -ErrorAction Stop
@@ -134,7 +135,7 @@ function Invoke-LabExtendedReview {
                     ($_.Image -and $_.Image.TrimEnd('\') -ieq $expanded) -or
                     ($kind -eq 'ExclusionProcess' -and [IO.Path]::GetFileName($_.Image) -ieq $expanded)
                 })
-                $broad=($kind -eq 'ExclusionPath' -and ($expanded -match '^[A-Za-z]:$|[*?]' -or $expanded -iin @("$env:SystemDrive\Users",$env:ProgramData,$env:SystemRoot))) -or
+                $broad=($kind -eq 'ExclusionPath' -and ($expanded -match '^[A-Za-z]:$|[*?]' -or $expanded -in @("$env:SystemDrive\Users",$env:ProgramData,$env:SystemRoot))) -or
                     ($kind -eq 'ExclusionExtension' -and $expanded.TrimStart('.') -in @('exe','dll','ps1','cmd','bat','vbs','js','*'))
                 $exclusionRows.Add([pscustomobject]@{Kind=$kind;Value=[string]$value;Broad=[bool]$broad;RelatedShellCommands=$related})
                 if ($related.Count) { Add-Review 'DefenderExclusion' ([string]$value) 'Exact exclusion is associated with a shell-execution candidate. Confirm authorization before removing only this exception.' 'High' }
@@ -150,7 +151,15 @@ function Invoke-LabExtendedReview {
         if ($preferences.PSObject.Properties['MAPSReporting'] -and [int]$preferences.MAPSReporting -eq 0) { Add-Review 'Defender' 'MAPSReporting' 'Cloud reporting is disabled; review scenario requirements.' }
         if ($preferences.PSObject.Properties['DisableBlockAtFirstSeen'] -and $preferences.DisableBlockAtFirstSeen) { Add-Review 'Defender' 'DisableBlockAtFirstSeen' 'Block-at-first-sight preference is disabled.' }
     }
+    foreach ($profile in $sections.effectivefirewall.Rows) {
+        if ($profile.PSObject.Properties['DisabledInterfaceAliases'] -and @($profile.DisabledInterfaceAliases | Where-Object {$_}).Count) { Add-Review 'FirewallPolicy' $profile.Name 'One or more adapters are exempt from filtering. Review DisabledInterfaceAliases and the active network adapter.' 'High' }
+        if ([string]$profile.Enabled -ne 'True') { Add-Review 'FirewallPolicy' $profile.Name 'Effective firewall profile is not enabled. Local preference writes may be overridden by policy; inspect ActiveStore and Group Policy.' 'High' }
+    }
     $policyRows=@(
+        Get-LabReviewRegistryValue 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall\DomainProfile' 'EnableFirewall'
+        Get-LabReviewRegistryValue 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall\StandardProfile' 'EnableFirewall'
+        Get-LabReviewRegistryValue 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall\PrivateProfile' 'EnableFirewall'
+        Get-LabReviewRegistryValue 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall\PublicProfile' 'EnableFirewall'
         Get-LabReviewRegistryValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet' 'SubmitSamplesConsent'
         Get-LabReviewRegistryValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' 'DisableNotificationCenter'
         Get-LabReviewRegistryValue 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer' 'DisableNotificationCenter'
@@ -160,8 +169,10 @@ function Invoke-LabExtendedReview {
     )
     foreach ($row in $policyRows) {
         if ($row.Status -eq 'Unknown') { Add-Review 'Policy' ($row.Path+'\'+$row.Name) 'Policy could not be read; do not interpret it as absent.' }
-        elseif ($row.Status -eq 'Present' -and $row.Name -ne 'SubmitSamplesConsent' -and [int]$row.Value -eq 1) {
+        elseif ($row.Status -eq 'Present' -and $row.Name -in @('DisableNotificationCenter','HideSCAHealth','DisableNotifications','DisableEnhancedNotifications') -and [int]$row.Value -eq 1) {
             Add-Review 'SecurityNotifications' ($row.Path+'\'+$row.Name) 'Security notifications/icon are explicitly hidden. Review the README monitoring requirement.' 'High'
+        } elseif ($row.Status -eq 'Present' -and $row.Name -eq 'EnableFirewall' -and [int]$row.Value -eq 0) {
+            Add-Review 'FirewallPolicy' ($row.Path+'\'+$row.Name) 'Firewall is explicitly disabled by a stored policy. Check effective profiles before and after any policy refresh/restart.' 'High'
         } elseif ($row.Status -eq 'Present' -and $row.Name -eq 'SubmitSamplesConsent' -and [int]$row.Value -eq 2) {
             Add-Review 'DefenderPolicy' ($row.Path+'\'+$row.Name) 'Never-send policy is explicit. A Set-MpPreference call may not change the effective value. Use the documented MAPS policy and verify readback; never disable tamper protection automatically.' 'High'
         }

@@ -225,6 +225,24 @@ try {
     $script:SimulateStalledService = $true
     Assert-Throws { & $monitoringAction }
 } finally { Remove-Item Function:\Get-Service,Function:\Set-Service,Function:\Start-Service }
+# A successful persistent firewall write must also pass effective-policy readback.
+$firewallCall = $ast.Find({param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-LabChange' -and $n.CommandElements[1].Value -eq 'Firewall'},$true)
+Assert-True ($null -ne $firewallCall) 'Missing firewall action.'
+function Set-NetFirewallProfile {
+    [CmdletBinding()]param($Profile,$Enabled,$DefaultInboundAction,$DefaultOutboundAction,$AllowInboundRules,$NotifyOnListen,$LogBlocked,$LogMaxSizeKilobytes)
+    Assert-True ($Profile.Count -eq 3 -and $Enabled -eq 'True') 'Firewall must be enabled for all three profiles.'
+}
+function Get-NetFirewallProfile {
+    [CmdletBinding()]param([string]$PolicyStore)
+    Assert-True ($PolicyStore -eq 'ActiveStore') 'Readback must inspect effective profiles, not only PersistentStore.'
+    foreach ($profile in @('Domain','Private','Public')) { [pscustomobject]@{Name=$profile;Enabled=$(if ($script:BlockFirewallWrite -and $profile -eq 'Public') {'False'} else {'True'})} }
+}
+try {
+    $script:BlockFirewallWrite=$false
+    & ($firewallCall.CommandElements[-1].ScriptBlock.GetScriptBlock())
+    $script:BlockFirewallWrite=$true
+    Assert-Throws { & ($firewallCall.CommandElements[-1].ScriptBlock.GetScriptBlock()) }
+} finally { Remove-Item Function:\Set-NetFirewallProfile,Function:\Get-NetFirewallProfile }
 # The action wrapper records failures while allowing later actions to continue.
 $script:Runner = [pscustomobject]@{}
 $script:Runner | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { $script:ApproveTestChange }

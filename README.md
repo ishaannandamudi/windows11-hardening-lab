@@ -8,7 +8,7 @@ Enter the valid Unique Identifier through the provided desktop icon if needed. S
 
 The profile preserves the passwords of `pparker`, the account running the script, and any configured auto-login account. It does not change the system time, time zone, Windows release, JavaScript, CCS Client, authorized home directories, or required application installations. The attached source README and its plaintext passwords are deliberately excluded from this repository.
 
-The GitHub workflow runs three regression suites in Windows PowerShell 5.1. They cover the original runtime fixes, optional advanced audit, and required/non-required RDP plans, group membership, deny rights, services, firewall readback, reports and installer flags using harmless stubs. They never run the hardening entrypoint or modify real accounts/services/firewall rules. A passing workflow does not replace an Audit and supervised Apply in the VM or an actual employee RDP sign-in test.
+The GitHub workflow runs five regression suites in Windows PowerShell 5.1. They cover the original runtime fixes, optional advanced audit, and required/non-required RDP plans, group membership, deny rights, services, firewall readback, reports and installer flags using harmless stubs. Additional suites exercise expanded review and exact-target cleanup with temporary fixture files and stubbed Windows actions. They never run the hardening entrypoint or modify real accounts/services/firewall rules; cleanup tests delete only their own temporary fixture files. A passing workflow does not replace an Audit and supervised Apply in the VM or an actual employee RDP sign-in test.
 
 ## Fixes from the first lab run
 
@@ -48,20 +48,20 @@ Validate the package and collect an audit/plan:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Validate-Package.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Validate-RdpScenario.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -ConfigPath .\lab.config.json -Mode Audit -AdvancedAudit
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Audit.ps1
 ```
 
 `-ExecutionPolicy Bypass` affects only the new PowerShell process. Audit exports settings and writes reports but does not apply the hardening actions. Its plan lists intended operations, including re-enforcement of settings that may already comply; it is not a claim that every listed operation represents a vulnerability.
 
-Review the printed report folder, especially `changes.json`, `before-users.json`, `applications.json`, `before-rdp.json`, `before-tasks.json`, `before-exclusions.json`, `advanced-review.txt` and `warnings.json`. Add `-ScanFiles` only when ready for the optional, potentially lengthy filename inventory; read the forensic questions first. The following optional audit command is the same deeper inspection shown above:
+Review the printed report folder, especially `changes.json`, `before-users.json`, `applications.json`, `before-rdp.json`, `before-tasks.json`, `before-exclusions.json`, `advanced-review.txt` and `warnings.json`. The recommended short `Audit.ps1` launcher includes the file scan and extended/advanced review; read the forensic questions first. These scans can take time and report unreadable locations. Direct invocation of the main script remains a lighter Audit unless `-ExtendedReview` or individual review switches are supplied.
 
-For deeper inspection, add `-AdvancedAudit` to the Audit command:
+Use this short launcher for the combined inspection:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -ConfigPath .\lab.config.json -Mode Audit -AdvancedAudit
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Audit.ps1
 ```
 
-Open `advanced-review.txt` first. The optional module compares stored registry values with the existing profile, inspects execution/logon/WMI hooks, existing BITS jobs, port forwarding, hosts/DNS/proxies, and Defender state. It writes evidence and review findings without changing settings or executing discovered commands. `High` means review first; `Unknown` means a check failed. Missing registry settings may select secure defaults. Only loaded user hives are inspected. These are observations **before** remediation, not proof of malware, points, or full compliance. Run a fresh Audit after changes. See [coverage and next priorities](docs/Coverage-Roadmap.md) for the basic coverage matrix, exact limitations and researched additions. The existing fixes and scenario settings remain in place; this switch is off by default.
+Open `advanced-review.txt` first. The optional module compares stored registry values with the existing profile, inspects execution/logon/WMI hooks, existing BITS jobs, port forwarding, hosts/DNS/proxies, and Defender state. It writes evidence and review findings without changing settings or executing discovered commands. `High` means review first; `Unknown` means a check failed. Missing registry settings may select secure defaults. Only loaded user hives are inspected. These are observations **before** remediation, not proof of malware, points, or full compliance. Run a fresh Audit after changes. See [coverage and next priorities](docs/Coverage-Roadmap.md) for the basic coverage matrix, exact limitations and researched additions. The existing fixes and scenario settings remain in place. `-ExtendedReview` requests both the advanced module and file inventory; the short launcher enables it, while direct main-script invocation keeps optional scans off by default.
 
 Apply the baseline and rotate authorized local-user passwords, preserving the protected login accounts:
 
@@ -69,17 +69,25 @@ Apply the baseline and rotate authorized local-user passwords, preserving the pr
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -ConfigPath .\lab.config.json -Mode Apply -RotatePasswords
 ```
 
-Optional update flags may be added to that Apply command:
+**Windows updates and app updates are manual by default and preferred for this lab.** The baseline command above does not start Windows Update or require WinGet. Optional update flags remain available; for example, updating Defender definitions alone:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -ConfigPath .\lab.config.json -Mode Apply -RotatePasswords -UpdateDefender -UpdateApps -InstallSecurityUpdates
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Windows11LabHardening.ps1 -ConfigPath .\lab.config.json -Mode Apply -RotatePasswords -UpdateDefender
 ```
 
-Updates can take a long time. App installers are interactive and use x64 packages. When prompted, choose **Do not close applications. A reboot will be required to complete the setup**, and defer any installer restart. The script does not pass WinGet's allow-reboot option or restart Windows itself. OpenRocket requires a separate vendor update (see below). Restart manually when ready, then run Audit again and verify business applications, sign-in and RDP. Exit code 2 means one or more requested actions failed; inspect `changes.json`. A preflight/terminating error returns a PowerShell failure. Nonzero WinGet results need review, including the ordinary case where an app has no available upgrade. A successful updater command does not prove all per-user installations are current.
+`-InstallSecurityUpdates` explicitly opts into synchronous Windows Update; stage messages and per-update HRESULT/results are saved. It is absent from recommended commands. `-UpdateApps` requires WinGet; when unavailable, update required apps manually. Updates can take a long time. App installers are interactive and use x64 packages. When prompted, choose **Do not close applications. A reboot will be required to complete the setup**, and defer any installer restart. The script does not pass WinGet's allow-reboot option or restart Windows itself. OpenRocket requires a separate vendor update (see below). Restart manually when ready, then run Audit again and verify business applications, sign-in and RDP. Exit code 2 means one or more requested actions failed; inspect `changes.json`. A preflight/terminating error returns a PowerShell failure. Nonzero WinGet results need review, including the ordinary case where an app has no available upgrade. A successful updater command does not prove all per-user installations are current.
 
 Do not repeat Apply just to retry a few failures: it resets passwords again (including hhogan even without `-RotatePasswords`). Correct and verify individual failed actions instead. Group removal passes the existing local principal object, rather than a raw SID object. Monitoring actions check the service first and preserve an existing automatic/delayed automatic startup setting. An access-denied configuration error alone does not establish whether Security Center is stopped; inspect `Get-Service wscsvc | Format-List Name,Status,StartType` before deciding what needs repair.
 
 `-WhatIf` with `-Mode Apply` also prevents remediation. `-ScanFiles` adds an optional file inventory; it does not delete findings. `-QuickScan` requests a Defender scan, **whose existing antivirus policy can quarantine detections**. Review protected lab components and forensic evidence before requesting a scan. This flag is off by default. Enabling real-time Defender protection can also trigger normal antivirus remediation independently of a requested scan.
+
+## Expanded review and reviewed cleanup
+
+The latest supplied report shows **95/100 and 18/19 checks**, including MP3 and netcat cleanup. The remaining check is unknown; see [the lab observations](docs/Round2-Lessons.md). No future score is promised.
+
+`Audit.ps1` now includes media/archive/hidden-script discovery with explicit coverage reporting, renamed shell-command/listener/persistence/exclusion correlation, Defender cloud/sample policy checks, notification policies, effective firewall state/policy and duplicate application registration review. Open `extended-review.txt`, `review-files.json` and `file-scan-status.json` in the printed report folder. Filename, hidden attribute and unsigned-signature findings require review.
+
+For confirmed targets, the separate `Invoke-ReviewedCleanup.ps1` can delete individually hash-verified files, disable matching scheduled-task persistence, stop approved matching executable processes, remove exact unauthorized antivirus exclusions and optionally enable safe-sample submission with readback. It requires a fresh local computer-bound plan, completed forensic work for Apply, and explicit file hashes/actions; its default is Audit. It does not rerun password rotation. The checked-in example is empty, and no current-image paths or port are default cleanup targets. See [instructions and limits](docs/Reviewed-Cleanup.md) before using it.
 
 ## Scenario profile
 
@@ -146,12 +154,12 @@ Configuration exports are **not a complete rollback**. They do not undo password
 
 ## Manual work that remains
 
-[Coverage and time-saving priorities](docs/Coverage-Roadmap.md) documents the optional advanced audit and remaining work; its original coverage matrix predates this required-RDP update. [Original Windows 11 research](docs/Hardening-Research.md) retains the earlier scenario's proposals and compatibility requirements. Proposed cleanup and additional enforcement settings are not enabled.
+[Coverage and time-saving priorities](docs/Coverage-Roadmap.md) documents the optional advanced audit and remaining work; its original coverage matrix predates this required-RDP update. [Original Windows 11 research](docs/Hardening-Research.md) retains the earlier scenario's proposals and compatibility requirements. Historical proposals remain separate from the explicit reviewed-cleanup helper described above.
 
 - Set **Google Chrome as the default** under Settings > Apps > Default apps in each account and verify the latest stable version. The script does not bypass Windows UserChoice protection. Some Chrome enterprise policies may depend on browser/device management state; verify `chrome://policy`.
 - Read forensic questions first. Examine suspicious tasks, startup entries, listening processes, event logs, user rights and files before changing or deleting them.
 - Verify all six required applications still work and are current. **Update OpenRocket through [its official download page](https://openrocket.info/downloads.html)** using the Windows x64 package; it bundles its required Java runtime. On November 13, 2026, the vendor's release was 24.12 while the WinGet manifest offered 23.09, so OpenRocket is deliberately excluded from the automated update IDs. Recheck the vendor rather than pinning an old version. Keep runtime dependencies. LibreOffice/Thunderbird and other users' installations can require manual vendor/account-specific updates.
-- Review unauthorized software in `applications.json`, including portable apps and other users' installs. Wireshark/Npcap are no longer protected requirements; Nmap, Burp Suite, Jellyfin and remote-control tools are also review candidates. A review match does not automatically authorize every dependency's removal. Finish relevant forensics, confirm authorization/dependencies, then use supported uninstallers. The script does not uninstall apps or delete archives/media.
+- Review unauthorized software in `applications.json`, including portable apps and other users' installs. Wireshark/Npcap are no longer protected requirements; Nmap, Burp Suite, Jellyfin and remote-control tools are also review candidates. A review match does not automatically authorize every dependency's removal. Finish relevant forensics, confirm authorization/dependencies, then use supported uninstallers. The baseline does not uninstall apps or delete files. The separate reviewed-cleanup helper only deletes exact hash-approved files from a local plan.
 - After Apply, inspect `after-rdp.json` and test an actual RDP sign-in from another computer using an authorized employee account and its current password. Confirm NLA remains enabled and unauthorized users cannot sign in. The stored configuration/local listener report cannot prove end-to-end access; a restart or targeted correction may still be needed.
 - Review Defender exclusions, tamper-protection failures and any third-party antivirus. The script does not disable tamper protection or silently clear exclusions.
 - Review administrative shares (such as C$, ADMIN$ and IPC$), share permissions, proxy/DNS configuration, browser extensions and per-user startup settings. System shares are not automatically removed.
