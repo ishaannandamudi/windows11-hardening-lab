@@ -18,11 +18,13 @@ param(
     [switch]$InstallSecurityUpdates,
     [switch]$UpdateDefender,
     [switch]$QuickScan,
-    [switch]$AdvancedAudit
+    [switch]$AdvancedAudit,
+    [switch]$ExtendedReview
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($ExtendedReview) { $AdvancedAudit = $true; $ScanFiles = $true }
 $script:Runner = $PSCmdlet
 $script:Changes = New-Object 'System.Collections.Generic.List[object]'
 $script:Warnings = New-Object 'System.Collections.Generic.List[string]'
@@ -247,12 +249,12 @@ function Save-Inventory {
         startup = { Get-CimInstance Win32_StartupCommand | Select-Object Name,Command,Location,User }
         listeners = { Get-NetTCPConnection -State Listen | Select-Object LocalAddress,LocalPort,OwningProcess }
         udp = { Get-NetUDPEndpoint | Select-Object LocalAddress,LocalPort,OwningProcess }
-        processes = { Get-CimInstance Win32_Process | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath }
+        processes = { Get-CimInstance Win32_Process | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine }
         shares = { Get-SmbShare | Select-Object Name,Path,Description,Special,@{n='Access';e={@(Get-SmbShareAccess -Name $_.Name | Select-Object AccountName,AccessControlType,AccessRight)}} }
         firewall = { Get-NetFirewallProfile | Select-Object Name,Enabled,DefaultInboundAction,DefaultOutboundAction,AllowInboundRules,LogBlocked,LogFileName }
-        defender = { Get-MpComputerStatus | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,BehaviorMonitorEnabled,IoavProtectionEnabled,AntivirusSignatureLastUpdated,IsTamperProtected }
+        defender = { Get-MpComputerStatus | Select-Object AMRunningMode,AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,BehaviorMonitorEnabled,IoavProtectionEnabled,AntivirusSignatureLastUpdated,IsTamperProtected }
         eventlog = { Get-WinEvent -ListLog Security | Select-Object LogName,IsEnabled,MaximumSizeInBytes,LogMode }
-        exclusions = { Get-MpPreference | Select-Object ExclusionPath,ExclusionExtension,ExclusionProcess,DisableRealtimeMonitoring,PUAProtection }
+        exclusions = { Get-MpPreference | Select-Object ExclusionPath,ExclusionExtension,ExclusionProcess,DisableRealtimeMonitoring,PUAProtection,MAPSReporting,SubmitSamplesConsent,DisableBlockAtFirstSeen }
         features = { Get-WindowsOptionalFeature -Online | Select-Object FeatureName,State }
         logons = { Get-WinEvent -FilterHashtable @{LogName='Security';Id=4625,4720;StartTime=(Get-Date).AddDays(-7)} -MaxEvents 200 -ErrorAction SilentlyContinue | Select-Object TimeCreated,Id,Message }
     }
@@ -546,22 +548,20 @@ function Save-LabRdpState {
 }
 
 function Find-ReviewFiles {
+    Import-Module -Name $reviewModule -Force -ErrorAction Stop
     $roots = @("$env:SystemDrive\Users", "$env:ProgramData", "$env:SystemRoot\Temp", "$env:SystemDrive\Temp")
-    $scanErrors = @()
-    $findings = foreach ($root in $roots) {
-        if (-not (Test-Path -LiteralPath $root)) { continue }
-        Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable +scanErrors |
-            Where-Object { $_.FullName -notlike "$script:BasePath\*" -and ($_.Extension.ToLowerInvariant() -in $script:Profile.MediaExtensions -or $_.Name -in $script:Profile.ReviewExecutableNames) } |
-            Select-Object FullName,Length,LastWriteTime,@{n='Reason';e={if ($_.Name -in $script:Profile.ReviewExecutableNames) {'Review executable'} else {'Review media'}}}
-    }
-    Save-Json 'review-files.json' @($findings)
-    Write-LabWarning "File scan is a filename/extension inventory, not a malware verdict. Unreadable locations: $($scanErrors.Count). Nothing was deleted."
+    $inventory = Get-LabReviewFileInventory -Roots $roots -MediaExtensions $script:Profile.MediaExtensions -ToolNames $script:Profile.ReviewExecutableNames -ExcludeRoot $script:BasePath
+    Save-Json 'review-files.json' $inventory.Files
+    Save-Json 'file-scan-status.json' ($inventory | Select-Object -Property * -ExcludeProperty Files)
+    Write-Host "File review: $($inventory.Files.Count) candidates; $($inventory.FilesExamined) files inspected; $($inventory.UnreadableLocations.Count) unreadable locations. Nothing deleted."
+    if ($inventory.Status -eq 'Partial') { Write-LabWarning 'File review is partial. Open file-scan-status.json for unreadable locations; access restrictions were not bypassed.' }
 }
 
 function Install-LabSecurityUpdates {
     $session = New-Object -ComObject Microsoft.Update.Session
     $session.ClientApplicationID = 'Windows11HardeningLab'
     $searcher = $session.CreateUpdateSearcher()
+    Write-Host '[Windows Update] Searching for approved security/critical/definition updates. This synchronous operation can take several minutes.'
     $found = $searcher.Search("IsInstalled=0 and IsHidden=0 and Type='Software'")
     $allow = @('0fa1201d-4330-4fa8-8ae9-b877473b6441','e6cf1350-c01b-414d-a61f-263d14d133b4','e0789628-ce08-4437-be74-2495b842f43b')
     $block = @('3689bdc8-b205-4af4-8d4a-a63924c5e9d5','b54e7d24-7add-428f-8b75-90a396fa584f')
@@ -576,15 +576,22 @@ function Install-LabSecurityUpdates {
     Save-Json 'windows-update-selection.json' @($review)
     if ($updates.Count -eq 0) { Write-LabWarning 'No already-approved security/critical/definition updates selected. Review Windows Update manually; feature and preview updates stay excluded.'; return }
     $downloader = $session.CreateUpdateDownloader(); $downloader.Updates = $updates
+    Write-Host "[Windows Update] Downloading $($updates.Count) selected updates. Manual updates are preferred; this runs only with -InstallSecurityUpdates."
     $download = $downloader.Download()
+    Save-Json 'windows-update-download.json' ([pscustomobject]@{ResultCode=[int]$download.ResultCode;HResult=$download.HResult})
     if ([int]$download.ResultCode -ne 2) { throw "Update download incomplete; result code $($download.ResultCode)." }
     $installer = $session.CreateUpdateInstaller(); $installer.Updates = $updates
     $installer.AllowSourcePrompts = $false; $installer.ForceQuiet = $true
     if ($installer.RebootRequiredBeforeInstallation) { throw 'A restart is already required. Restart manually before installing updates.' }
+    Write-Host '[Windows Update] Installing selected updates; waiting for Windows Update Agent to return. No restart will be initiated.'
     $result = $installer.Install()
-    Save-Json 'windows-update-result.json' ([pscustomobject]@{ResultCode=[int]$result.ResultCode;RebootRequired=$result.RebootRequired;HResult=$result.HResult})
+    $perUpdate = for ($index=0; $index -lt $updates.Count; $index++) {
+        $detail=$result.GetUpdateResult($index)
+        [pscustomobject]@{Title=$updates.Item($index).Title;ResultCode=[int]$detail.ResultCode;HResult=$detail.HResult;RebootRequired=$detail.RebootRequired}
+    }
+    Save-Json 'windows-update-result.json' ([pscustomobject]@{ResultCode=[int]$result.ResultCode;RebootRequired=$result.RebootRequired;HResult=$result.HResult;Updates=@($perUpdate)})
     if ($result.RebootRequired) { $script:RebootNeeded = $true }
-    if ([int]$result.ResultCode -ne 2) { throw "Update installation incomplete; result code $($result.ResultCode)." }
+    if ([int]$result.ResultCode -ne 2) { throw "Update installation incomplete; result code $($result.ResultCode), HRESULT $($result.HResult). See windows-update-result.json for individual updates. Finish through Windows Update manually; do not rerun baseline Apply to retry updates." }
 }
 
 # Preflight: Windows 11 client, standalone local accounts, VM console.
@@ -607,6 +614,8 @@ if ($UpdateDefender) { $requiredCommands += 'Update-MpSignature' }
 if ($QuickScan) { $requiredCommands += 'Start-MpScan' }
 if ($script:Profile.EnableRemoteDesktop) { $requiredCommands += @('Set-NetFirewallRule','Get-NetFirewallPortFilter','Get-NetFirewallAddressFilter','Get-NetTCPConnection') }
 Assert-LabCapabilities $requiredCommands
+$reviewModule = Join-Path $PSScriptRoot 'modules\Lab.Review.psm1'
+if (($ScanFiles -or $ExtendedReview) -and -not (Test-Path -LiteralPath $reviewModule -PathType Leaf)) { throw 'File/extended review requires modules\Lab.Review.psm1. Extract the complete repository ZIP.' }
 $advancedAuditModule = Join-Path $PSScriptRoot 'modules\Lab.AdvancedAudit.psm1'
 if ($AdvancedAudit -and -not (Test-Path -LiteralPath $advancedAuditModule -PathType Leaf)) {
     throw 'AdvancedAudit requires modules\Lab.AdvancedAudit.psm1. Extract the complete repository ZIP.'
@@ -649,8 +658,9 @@ try {
         Edition=$edition
         ScriptSHA256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
         ProfileSHA256=(Get-FileHash -LiteralPath $ConfigPath -Algorithm SHA256).Hash
+        ReviewModuleSHA256=$(if ($ScanFiles -or $ExtendedReview) {(Get-FileHash -LiteralPath $reviewModule -Algorithm SHA256).Hash} else {$null})
         AdvancedAuditModuleSHA256=$(if ($AdvancedAudit) {(Get-FileHash -LiteralPath $advancedAuditModule -Algorithm SHA256).Hash} else {$null})
-        Options=[pscustomobject]@{Mode=$Mode;WhatIf=[bool]$WhatIfPreference;RotatePasswords=[bool]$RotatePasswords;ScanFiles=[bool]$ScanFiles;UpdateApps=[bool]$UpdateApps;InstallSecurityUpdates=[bool]$InstallSecurityUpdates;UpdateDefender=[bool]$UpdateDefender;QuickScan=[bool]$QuickScan;AdvancedAudit=[bool]$AdvancedAudit}
+        Options=[pscustomobject]@{Mode=$Mode;WhatIf=[bool]$WhatIfPreference;RotatePasswords=[bool]$RotatePasswords;ScanFiles=[bool]$ScanFiles;UpdateApps=[bool]$UpdateApps;InstallSecurityUpdates=[bool]$InstallSecurityUpdates;UpdateDefender=[bool]$UpdateDefender;QuickScan=[bool]$QuickScan;AdvancedAudit=[bool]$AdvancedAudit;ExtendedReview=[bool]$ExtendedReview}
     })
     Save-Inventory 'before'
     Save-Json 'applications.json' @(Get-ApplicationInventory)
@@ -661,6 +671,19 @@ try {
     Save-LabBackups
     if ($script:Profile.EnableRemoteDesktop) {
         try { Save-LabRdpState 'before' } catch { Write-LabWarning "RDP before-state collection: $($_.Exception.Message)" }
+    }
+    if ($ScanFiles) {
+        try { Find-ReviewFiles }
+        catch {
+            Save-Json 'file-scan-status.json' ([pscustomobject]@{Status='Unknown';Detail=$_.Exception.Message})
+            Write-LabWarning "File review incomplete: $($_.Exception.Message)"
+        }
+    }
+    if ($ExtendedReview) {
+        try {
+            Import-Module -Name $reviewModule -Force -ErrorAction Stop
+            Invoke-LabExtendedReview -OutputDirectory $script:RunPath
+        } catch { Write-LabWarning "Extended review incomplete: $($_.Exception.Message). No clean verdict can be inferred." }
     }
     if ($AdvancedAudit) {
         try {
@@ -813,7 +836,6 @@ try {
         }
     }
     if ($InstallSecurityUpdates) { Invoke-LabChange 'WindowsUpdates' 'Windows Update Agent' 'Install only classified security/critical/definition updates; exclude feature/preview builds; never reboot' { Install-LabSecurityUpdates } }
-    if ($ScanFiles) { Find-ReviewFiles }
     # Accessibility hijacks are reported as evidence, never overwritten or launched.
     $accessibility = foreach ($exe in @('sethc.exe','utilman.exe','osk.exe','Narrator.exe','Magnify.exe')) {
         $file = Join-Path "$env:SystemRoot\System32" $exe

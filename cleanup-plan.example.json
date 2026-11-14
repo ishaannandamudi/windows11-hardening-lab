@@ -1,0 +1,9 @@
+{
+  "SchemaVersion": 1,
+  "ComputerName": "REPLACE_WITH_THIS_VM_NAME",
+  "ForensicsComplete": false,
+  "Files": [],
+  "Tasks": [],
+  "DefenderExclusions": [],
+  "EnableSafeSampleSubmission": false
+}

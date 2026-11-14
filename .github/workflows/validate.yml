@@ -16,3 +16,9 @@ jobs:
       - name: Test required RDP and interactive update scenario without remediation
         shell: powershell
         run: .\tests\Validate-RdpScenario.ps1
+      - name: Test expanded file and persistence review
+        shell: powershell
+        run: .\tests\Validate-Review.ps1
+      - name: Test reviewed cleanup guards using temporary files and stubbed Windows actions
+        shell: powershell
+        run: .\tests\Validate-Cleanup.ps1
